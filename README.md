@@ -44,6 +44,7 @@ On first launch an empty database is created next to the Python modules. Use **F
 - **Expand all / Collapse all** control the visibility of the hierarchy tree.
 - The form on the right displays the details of the selection and exposes fields when you are adding or editing items.
 - Update the **Current value** field whenever the value of an allocation changes (for example after a price movement).
+- Use the **Instrument** field on leaf allocations to label positions that should be aggregated when rebalancing.
 - The **Tools** menu hosts the distribution calculator and the distribution history browser.
 
 The *Children share* label helps you verify that the percentages of the immediate children sum up correctly for the selected parent.
@@ -64,6 +65,7 @@ Exports contain the following columns:
 | `parent_id` | Identifier of the parent allocation (empty for top-level rows). |
 | `name` | Display name of the bucket. |
 | `currency` | Optional currency label. |
+| `instrument` | Optional instrument label used for aggregation in distribution plans. |
 | `target_percent` | Share of the parent bucket expressed as a percentage. |
 | `include_in_rollup` | `1` if the allocation contributes to the overall totals, otherwise `0`. |
 | `current_value` | Tracked monetary value of the allocation. |

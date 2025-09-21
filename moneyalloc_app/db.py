@@ -37,6 +37,7 @@ class AllocationRepository:
                     parent_id INTEGER REFERENCES allocations(id) ON DELETE CASCADE,
                     name TEXT NOT NULL,
                     currency TEXT,
+                    instrument TEXT,
                     target_percent REAL NOT NULL DEFAULT 0.0,
                     include_in_rollup INTEGER NOT NULL DEFAULT 1,
                     notes TEXT,
@@ -54,6 +55,8 @@ class AllocationRepository:
             # Ensure the table carries the new column when upgrading from older versions.
             info = conn.execute("PRAGMA table_info(allocations)").fetchall()
             columns = {row[1] for row in info}
+            if "instrument" not in columns:
+                conn.execute("ALTER TABLE allocations ADD COLUMN instrument TEXT")
             if "current_value" not in columns:
                 conn.execute(
                     "ALTER TABLE allocations ADD COLUMN current_value REAL NOT NULL DEFAULT 0.0"
@@ -127,13 +130,24 @@ class AllocationRepository:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO allocations (parent_id, name, currency, target_percent, include_in_rollup, notes, sort_order, current_value)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO allocations (
+                    parent_id,
+                    name,
+                    currency,
+                    instrument,
+                    target_percent,
+                    include_in_rollup,
+                    notes,
+                    sort_order,
+                    current_value
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     allocation.parent_id,
                     allocation.name,
                     allocation.currency,
+                    allocation.instrument,
                     allocation.target_percent,
                     1 if allocation.include_in_rollup else 0,
                     allocation.notes,
@@ -154,6 +168,7 @@ class AllocationRepository:
                 SET parent_id = ?,
                     name = ?,
                     currency = ?,
+                    instrument = ?,
                     target_percent = ?,
                     include_in_rollup = ?,
                     notes = ?,
@@ -165,6 +180,7 @@ class AllocationRepository:
                     allocation.parent_id,
                     allocation.name,
                     allocation.currency,
+                    allocation.instrument,
                     allocation.target_percent,
                     1 if allocation.include_in_rollup else 0,
                     allocation.notes,
@@ -189,8 +205,19 @@ class AllocationRepository:
         with self._connect() as conn:
             conn.executemany(
                 """
-                INSERT INTO allocations (id, parent_id, name, currency, target_percent, include_in_rollup, notes, sort_order, current_value)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO allocations (
+                    id,
+                    parent_id,
+                    name,
+                    currency,
+                    instrument,
+                    target_percent,
+                    include_in_rollup,
+                    notes,
+                    sort_order,
+                    current_value
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -198,6 +225,7 @@ class AllocationRepository:
                         item.parent_id,
                         item.name,
                         item.currency,
+                        item.instrument,
                         item.target_percent,
                         1 if item.include_in_rollup else 0,
                         item.notes,
@@ -219,6 +247,7 @@ class AllocationRepository:
             parent_id=row["parent_id"],
             name=row["name"],
             currency=row["currency"],
+            instrument=row["instrument"],
             target_percent=float(row["target_percent"] or 0.0),
             include_in_rollup=bool(row["include_in_rollup"]),
             notes=row["notes"] or "",

@@ -13,6 +13,7 @@ class Allocation:
     parent_id: Optional[int]
     name: str
     currency: Optional[str]
+    instrument: Optional[str]
     target_percent: float
     include_in_rollup: bool
     notes: str
@@ -23,6 +24,11 @@ class Allocation:
     def normalized_currency(self) -> str:
         """Return the currency string suitable for display."""
         return (self.currency or "").strip()
+
+    @property
+    def normalized_instrument(self) -> str:
+        """Return the instrument string suitable for display."""
+        return (self.instrument or "").strip()
 
 
 @dataclass(slots=True)
