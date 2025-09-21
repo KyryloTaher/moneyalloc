@@ -13,6 +13,7 @@ class AllocationSeed:
     name: str
     target_percent: float
     currency: Optional[str] = None
+    instrument: Optional[str] = None
     include: bool = True
     notes: str = ""
     children: Iterable["AllocationSeed"] | None = None
@@ -23,6 +24,7 @@ class AllocationSeed:
             parent_id=parent_id,
             name=self.name,
             currency=self.currency,
+            instrument=self.instrument,
             target_percent=self.target_percent,
             include_in_rollup=self.include,
             notes=self.notes,

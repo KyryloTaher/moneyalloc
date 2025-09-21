@@ -26,6 +26,22 @@ class PlanRow:
 
     allocation_id: int
     path: str
+    instrument: str
+    currency: str
+    target_share: float
+    current_value: float
+    current_share: float
+    target_value: float
+    recommended_change: float
+    share_diff: float
+    action: str
+
+
+@dataclass(slots=True)
+class InstrumentSummary:
+    """Aggregated recommendation metrics for a single instrument."""
+
+    name: str
     currency: str
     target_share: float
     current_value: float
@@ -68,6 +84,7 @@ class AllocationApp(ttk.Frame):
 
         self.name_var = tk.StringVar()
         self.currency_var = tk.StringVar()
+        self.instrument_var = tk.StringVar()
         self.percent_var = tk.StringVar()
         self.value_var = tk.StringVar()
         self.include_var = tk.BooleanVar(value=True)
@@ -153,7 +170,7 @@ class AllocationApp(ttk.Frame):
         form = ttk.LabelFrame(self, text="Allocation details")
         form.grid(row=1, column=1, padx=(10, 0), sticky="nsew")
         form.columnconfigure(1, weight=1)
-        form.rowconfigure(6, weight=1)
+        form.rowconfigure(7, weight=1)
 
         ttk.Label(form, text="Path:").grid(row=0, column=0, sticky="w")
         ttk.Label(form, textvariable=self.path_var, wraplength=260).grid(row=0, column=1, sticky="w")
@@ -166,26 +183,30 @@ class AllocationApp(ttk.Frame):
         self.currency_entry = ttk.Entry(form, textvariable=self.currency_var)
         self.currency_entry.grid(row=2, column=1, sticky="ew", pady=(6, 0))
 
-        ttk.Label(form, text="Share of parent (%):").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(form, text="Instrument:").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.instrument_entry = ttk.Entry(form, textvariable=self.instrument_var)
+        self.instrument_entry.grid(row=3, column=1, sticky="ew", pady=(6, 0))
+
+        ttk.Label(form, text="Share of parent (%):").grid(row=4, column=0, sticky="w", pady=(6, 0))
         self.percent_entry = ttk.Entry(form, textvariable=self.percent_var)
-        self.percent_entry.grid(row=3, column=1, sticky="ew", pady=(6, 0))
+        self.percent_entry.grid(row=4, column=1, sticky="ew", pady=(6, 0))
 
-        ttk.Label(form, text="Current value:").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(form, text="Current value:").grid(row=5, column=0, sticky="w", pady=(6, 0))
         self.value_entry = ttk.Entry(form, textvariable=self.value_var)
-        self.value_entry.grid(row=4, column=1, sticky="ew", pady=(6, 0))
+        self.value_entry.grid(row=5, column=1, sticky="ew", pady=(6, 0))
 
-        ttk.Label(form, text="Included in roll-up:").grid(row=5, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(form, text="Included in roll-up:").grid(row=6, column=0, sticky="w", pady=(6, 0))
         self.include_check = ttk.Checkbutton(form, variable=self.include_var, text="Yes")
-        self.include_check.grid(row=5, column=1, sticky="w", pady=(6, 0))
+        self.include_check.grid(row=6, column=1, sticky="w", pady=(6, 0))
 
-        ttk.Label(form, text="Notes:").grid(row=6, column=0, sticky="nw", pady=(6, 0))
+        ttk.Label(form, text="Notes:").grid(row=7, column=0, sticky="nw", pady=(6, 0))
         self.notes_text = tk.Text(form, height=8, wrap="word")
-        self.notes_text.grid(row=6, column=1, sticky="nsew", pady=(6, 0))
+        self.notes_text.grid(row=7, column=1, sticky="nsew", pady=(6, 0))
         notes_scroll = ttk.Scrollbar(form, orient="vertical", command=self.notes_text.yview)
         self.notes_text.configure(yscrollcommand=notes_scroll.set)
-        notes_scroll.grid(row=6, column=2, sticky="nsw")
+        notes_scroll.grid(row=7, column=2, sticky="nsw")
 
-        ttk.Label(form, textvariable=self.child_sum_var).grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(form, textvariable=self.child_sum_var).grid(row=8, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         # Status bar
         status = ttk.Label(self, textvariable=self.status_var, anchor="w")
@@ -231,6 +252,7 @@ class AllocationApp(ttk.Frame):
                     "parent_id",
                     "name",
                     "currency",
+                    "instrument",
                     "target_percent",
                     "include_in_rollup",
                     "current_value",
@@ -249,6 +271,7 @@ class AllocationApp(ttk.Frame):
                             parent_id=int(row["parent_id"]) if row["parent_id"].strip() else None,
                             name=row["name"].strip(),
                             currency=row["currency"].strip() or None,
+                            instrument=row["instrument"].strip() or None,
                             target_percent=float(row["target_percent"] or 0.0),
                             include_in_rollup=row["include_in_rollup"].strip().lower() in {"1", "true", "yes"},
                             current_value=float(row["current_value"] or 0.0),
@@ -283,6 +306,7 @@ class AllocationApp(ttk.Frame):
                         "parent_id",
                         "name",
                         "currency",
+                        "instrument",
                         "target_percent",
                         "include_in_rollup",
                         "current_value",
@@ -297,6 +321,7 @@ class AllocationApp(ttk.Frame):
                             allocation.parent_id if allocation.parent_id is not None else "",
                             allocation.name,
                             allocation.currency or "",
+                            allocation.instrument or "",
                             f"{allocation.target_percent:.4f}",
                             int(allocation.include_in_rollup),
                             f"{allocation.current_value:.2f}",
@@ -399,6 +424,7 @@ class AllocationApp(ttk.Frame):
 
         notes = self.notes_text.get("1.0", "end").strip()
         currency = self.currency_var.get().strip() or None
+        instrument = self.instrument_var.get().strip() or None
         include = bool(self.include_var.get())
 
         if self.mode == "add":
@@ -409,6 +435,7 @@ class AllocationApp(ttk.Frame):
                 parent_id=parent_id,
                 name=name,
                 currency=currency,
+                instrument=instrument,
                 target_percent=percent_value,
                 include_in_rollup=include,
                 notes=notes,
@@ -435,6 +462,7 @@ class AllocationApp(ttk.Frame):
                 return
             current.name = name
             current.currency = currency
+            current.instrument = instrument
             current.target_percent = percent_value
             current.include_in_rollup = include
             current.notes = notes
@@ -592,7 +620,13 @@ class AllocationApp(ttk.Frame):
     # ------------------------------------------------------------------
     def _set_form_state(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
-        for entry in (self.name_entry, self.currency_entry, self.percent_entry, self.value_entry):
+        for entry in (
+            self.name_entry,
+            self.currency_entry,
+            self.instrument_entry,
+            self.percent_entry,
+            self.value_entry,
+        ):
             entry.config(state=state)
         self.include_check.config(state=state)
         if enabled:
@@ -603,6 +637,7 @@ class AllocationApp(ttk.Frame):
     def _clear_form(self) -> None:
         self.name_var.set("")
         self.currency_var.set("")
+        self.instrument_var.set("")
         self.percent_var.set("0")
         self.value_var.set("0")
         self.include_var.set(True)
@@ -613,6 +648,7 @@ class AllocationApp(ttk.Frame):
     def _fill_form(self, allocation: Allocation) -> None:
         self.name_var.set(allocation.name)
         self.currency_var.set(allocation.normalized_currency)
+        self.instrument_var.set(allocation.normalized_instrument)
         self.percent_var.set(f"{allocation.target_percent:.2f}")
         self.value_var.set(f"{allocation.current_value:.2f}")
         self.include_var.set(allocation.include_in_rollup)
@@ -656,6 +692,7 @@ class DistributionDialog(tk.Toplevel):
         self.repo = repo
         self.on_saved = on_saved
         self.plan_rows: list[PlanRow] = []
+        self.instrument_summaries: list[InstrumentSummary] = []
         self.amount: float = 0.0
         self.tolerance: float = 0.0
         self.totals: dict[str, float] = {
@@ -782,7 +819,7 @@ class DistributionDialog(tk.Toplevel):
             )
             return
 
-        plan_rows, totals = self._build_plan(amount, tolerance)
+        plan_rows, totals, instrument_summaries = self._build_plan(amount, tolerance)
         if not plan_rows:
             messagebox.showinfo(
                 "No included allocations",
@@ -794,9 +831,11 @@ class DistributionDialog(tk.Toplevel):
             self.summary_var.set("No plan available. Update your allocations and try again.")
             self.save_button.config(state="disabled")
             self.plan_rows = []
+            self.instrument_summaries = []
             return
 
         self.plan_rows = plan_rows
+        self.instrument_summaries = instrument_summaries
         self.amount = amount
         self.tolerance = tolerance
         self.totals = totals
@@ -805,7 +844,52 @@ class DistributionDialog(tk.Toplevel):
 
     def _populate_tree(self) -> None:
         self.tree.delete(*self.tree.get_children())
+        instrument_groups: dict[str, list[PlanRow]] = {}
         for row in self.plan_rows:
+            instrument_name = row.instrument.strip()
+            if instrument_name:
+                instrument_groups.setdefault(instrument_name, []).append(row)
+
+        for index, summary in enumerate(self.instrument_summaries):
+            parent_iid = f"instrument:{index}"
+            self.tree.insert(
+                "",
+                "end",
+                iid=parent_iid,
+                text=f"Instrument: {summary.name}",
+                values=(
+                    summary.currency,
+                    _format_percent(summary.target_share),
+                    _format_amount(summary.current_value),
+                    _format_percent(summary.current_share),
+                    _format_amount(summary.target_value),
+                    _format_amount(summary.recommended_change),
+                    _format_share_delta(summary.share_diff),
+                    summary.action,
+                ),
+                open=True,
+            )
+            for row in instrument_groups.get(summary.name, []):
+                self.tree.insert(
+                    parent_iid,
+                    "end",
+                    iid=str(row.allocation_id),
+                    text=row.path,
+                    values=(
+                        row.currency,
+                        _format_percent(row.target_share),
+                        _format_amount(row.current_value),
+                        _format_percent(row.current_share),
+                        _format_amount(row.target_value),
+                        _format_amount(row.recommended_change),
+                        _format_share_delta(row.share_diff),
+                        row.action,
+                    ),
+                )
+
+        for row in self.plan_rows:
+            if row.instrument.strip():
+                continue
             self.tree.insert(
                 "",
                 "end",
@@ -832,7 +916,9 @@ class DistributionDialog(tk.Toplevel):
         ]
         self.summary_var.set("\n".join(summary_lines))
 
-    def _build_plan(self, amount: float, tolerance: float) -> tuple[list[PlanRow], dict[str, float]]:
+    def _build_plan(
+        self, amount: float, tolerance: float
+    ) -> tuple[list[PlanRow], dict[str, float], list[InstrumentSummary]]:
         allocations = self.repo.get_all_allocations()
         nodes: dict[int, TreeNode] = {}
         roots: list[TreeNode] = []
@@ -846,7 +932,7 @@ class DistributionDialog(tk.Toplevel):
                 "target_total": amount,
                 "invest_total": amount,
                 "divest_total": 0.0,
-            }
+            }, []
 
         for allocation in allocations:
             if allocation.id is None:
@@ -892,6 +978,7 @@ class DistributionDialog(tk.Toplevel):
                     PlanRow(
                         allocation_id=allocation.id,
                         path=" > ".join(current_path),
+                        instrument=allocation.normalized_instrument,
                         currency=allocation.normalized_currency,
                         target_share=cumulative_share,
                         current_value=allocation.current_value,
@@ -932,13 +1019,56 @@ class DistributionDialog(tk.Toplevel):
             else:
                 divest_total += row.recommended_change
 
+        instrument_groups: dict[str, list[PlanRow]] = {}
+        for row in plan_rows:
+            name = row.instrument.strip()
+            if name:
+                instrument_groups.setdefault(name, []).append(row)
+
+        instrument_summaries: list[InstrumentSummary] = []
+        for name, rows in instrument_groups.items():
+            target_share = sum(child.target_share for child in rows)
+            current_value = sum(child.current_value for child in rows)
+            current_share = sum(child.current_share for child in rows)
+            target_value = sum(child.target_value for child in rows)
+            recommended_change = sum(child.recommended_change for child in rows)
+            share_diff = sum(child.share_diff for child in rows)
+            currencies = {child.currency for child in rows if child.currency}
+            if not currencies:
+                currency = ""
+            elif len(currencies) == 1:
+                currency = next(iter(currencies))
+            else:
+                currency = "Mixed"
+            if abs(share_diff) < tolerance:
+                action = f"Within tolerance ({_format_share_delta(share_diff)})"
+            elif recommended_change >= 0:
+                action = f"Invest ({_format_share_delta(share_diff)})"
+            else:
+                action = f"Divest ({_format_share_delta(share_diff)})"
+            instrument_summaries.append(
+                InstrumentSummary(
+                    name=name,
+                    currency=currency,
+                    target_share=target_share,
+                    current_value=current_value,
+                    current_share=current_share,
+                    target_value=target_value,
+                    recommended_change=recommended_change,
+                    share_diff=share_diff,
+                    action=action,
+                )
+            )
+
+        instrument_summaries.sort(key=lambda summary: summary.name.lower())
+
         totals = {
             "current_total": total_current,
             "target_total": target_total,
             "invest_total": invest_total,
             "divest_total": divest_total,
         }
-        return plan_rows, totals
+        return plan_rows, totals, instrument_summaries
 
     # ------------------------------------------------------------------
     # Persistence
