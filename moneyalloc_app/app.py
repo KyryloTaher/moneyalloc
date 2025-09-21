@@ -570,7 +570,7 @@ class AllocationApp(ttk.Frame):
             ),
             open=True,
         )
-        next_parent_share = cumulative if allocation.include_in_rollup else parent_share
+        next_parent_share = cumulative
         for child in node.children:
             self._insert_node(iid, child, next_parent_share)
 
@@ -903,8 +903,8 @@ class DistributionDialog(tk.Toplevel):
                     )
                 )
 
-            next_parent_share = cumulative_share if allocation.include_in_rollup else parent_share
-            
+            next_parent_share = cumulative_share
+
             for child in included_children:
                 gather(child, next_parent_share, current_path)
 
