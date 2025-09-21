@@ -902,7 +902,9 @@ class DistributionDialog(tk.Toplevel):
                         action="",
                     )
                 )
+
             next_parent_share = cumulative_share if allocation.include_in_rollup else parent_share
+            
             for child in included_children:
                 gather(child, next_parent_share, current_path)
 
