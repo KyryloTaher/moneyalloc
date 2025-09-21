@@ -8,10 +8,13 @@ It stores your allocations in a local SQLite database (`allocations.db`) and pro
 - Visualise your allocation hierarchy in a multi-column tree view.
 - Create, edit and delete buckets with arbitrary nesting depth.
 - Track both the share relative to the parent bucket and the cumulative share of the overall plan.
+- Record the current monetary value for every allocation and update it as prices move.
 - Mark buckets as *included* or *excluded* from the aggregated roll-up percentages.
 - Attach notes to every allocation for additional context.
+- Generate distribution recommendations for new deposits or rebalancing, including invest/divest guidance based on a tolerance you choose.
 - Import a comprehensive sample dataset or replace your data from a CSV export.
 - Export the current database contents to CSV for backups or further processing.
+- Keep an audit trail of saved distributions and review them at any time.
 
 ## Getting started
 
@@ -40,8 +43,16 @@ On first launch an empty database is created next to the Python modules. Use **F
 - **Delete** removes the selected bucket and all of its descendants.
 - **Expand all / Collapse all** control the visibility of the hierarchy tree.
 - The form on the right displays the details of the selection and exposes fields when you are adding or editing items.
+- Update the **Current value** field whenever the value of an allocation changes (for example after a price movement).
+- The **Tools** menu hosts the distribution calculator and the distribution history browser.
 
 The *Children share* label helps you verify that the percentages of the immediate children sum up correctly for the selected parent.
+
+## Distributing money
+
+Use **Tools → Distribute funds…** to enter the amount you would like to allocate and the maximum deviation (in percentage points) you are willing to tolerate. The dialog calculates the target value for every included allocation, highlights which buckets need investment or divestment and allows you to save the plan to the database.
+
+Saved plans can be reviewed or deleted via **Tools → Distribution history…**. The history view shows the recorded totals, the tolerance that was used and the recommended actions for each allocation.
 
 ## CSV import/export format
 
@@ -55,10 +66,11 @@ Exports contain the following columns:
 | `currency` | Optional currency label. |
 | `target_percent` | Share of the parent bucket expressed as a percentage. |
 | `include_in_rollup` | `1` if the allocation contributes to the overall totals, otherwise `0`. |
+| `current_value` | Tracked monetary value of the allocation. |
 | `notes` | Free-form description or comments. |
 | `sort_order` | Integer describing the order of siblings. |
 
-When importing from CSV you must keep these columns (you can edit the values).  
+When importing from CSV you must keep these columns (you can edit the values).
 The application clears the current database before inserting the imported rows.
 
 ## Database location
