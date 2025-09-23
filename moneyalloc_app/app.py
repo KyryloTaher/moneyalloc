@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,6 +13,10 @@ from typing import Callable, Dict, Iterable, List, Optional
 from .db import AllocationRepository
 from .models import Allocation, Distribution, DistributionEntry
 from .sample_data import populate_with_sample_data
+
+
+DEFAULT_TIME_HORIZONS: tuple[str, ...] = ("Short term", "Medium term", "Long term")
+ALL_TIME_HORIZONS_OPTION = "All time horizons"
 
 
 @dataclass
@@ -85,6 +90,7 @@ class AllocationApp(ttk.Frame):
         self.name_var = tk.StringVar()
         self.currency_var = tk.StringVar()
         self.instrument_var = tk.StringVar()
+        self.horizon_var = tk.StringVar()
         self.percent_var = tk.StringVar()
         self.value_var = tk.StringVar()
         self.include_var = tk.BooleanVar(value=True)
@@ -145,18 +151,20 @@ class AllocationApp(ttk.Frame):
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
 
-        columns = ("currency", "target", "cumulative", "included")
+        columns = ("currency", "target", "cumulative", "included", "horizon")
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="tree headings", selectmode="browse")
         self.tree.heading("#0", text="Allocation")
         self.tree.heading("currency", text="Currency")
         self.tree.heading("target", text="Share of parent")
         self.tree.heading("cumulative", text="Share of total")
         self.tree.heading("included", text="Included")
+        self.tree.heading("horizon", text="Time horizon")
         self.tree.column("#0", width=240)
         self.tree.column("currency", width=80, anchor="center")
         self.tree.column("target", width=120, anchor="e")
         self.tree.column("cumulative", width=120, anchor="e")
         self.tree.column("included", width=80, anchor="center")
+        self.tree.column("horizon", width=120, anchor="center")
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.tree.grid(row=0, column=0, sticky="nsew")
 
@@ -170,7 +178,7 @@ class AllocationApp(ttk.Frame):
         form = ttk.LabelFrame(self, text="Allocation details")
         form.grid(row=1, column=1, padx=(10, 0), sticky="nsew")
         form.columnconfigure(1, weight=1)
-        form.rowconfigure(7, weight=1)
+        form.rowconfigure(8, weight=1)
 
         ttk.Label(form, text="Path:").grid(row=0, column=0, sticky="w")
         ttk.Label(form, textvariable=self.path_var, wraplength=260).grid(row=0, column=1, sticky="w")
@@ -187,26 +195,35 @@ class AllocationApp(ttk.Frame):
         self.instrument_entry = ttk.Entry(form, textvariable=self.instrument_var)
         self.instrument_entry.grid(row=3, column=1, sticky="ew", pady=(6, 0))
 
-        ttk.Label(form, text="Share of parent (%):").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(form, text="Time horizon:").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        self.horizon_combo = ttk.Combobox(
+            form,
+            textvariable=self.horizon_var,
+            values=list(DEFAULT_TIME_HORIZONS),
+            width=27,
+        )
+        self.horizon_combo.grid(row=4, column=1, sticky="ew", pady=(6, 0))
+
+        ttk.Label(form, text="Share of parent (%):").grid(row=5, column=0, sticky="w", pady=(6, 0))
         self.percent_entry = ttk.Entry(form, textvariable=self.percent_var)
-        self.percent_entry.grid(row=4, column=1, sticky="ew", pady=(6, 0))
+        self.percent_entry.grid(row=5, column=1, sticky="ew", pady=(6, 0))
 
-        ttk.Label(form, text="Current value:").grid(row=5, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(form, text="Current value:").grid(row=6, column=0, sticky="w", pady=(6, 0))
         self.value_entry = ttk.Entry(form, textvariable=self.value_var)
-        self.value_entry.grid(row=5, column=1, sticky="ew", pady=(6, 0))
+        self.value_entry.grid(row=6, column=1, sticky="ew", pady=(6, 0))
 
-        ttk.Label(form, text="Included in roll-up:").grid(row=6, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(form, text="Included in roll-up:").grid(row=7, column=0, sticky="w", pady=(6, 0))
         self.include_check = ttk.Checkbutton(form, variable=self.include_var, text="Yes")
-        self.include_check.grid(row=6, column=1, sticky="w", pady=(6, 0))
+        self.include_check.grid(row=7, column=1, sticky="w", pady=(6, 0))
 
-        ttk.Label(form, text="Notes:").grid(row=7, column=0, sticky="nw", pady=(6, 0))
+        ttk.Label(form, text="Notes:").grid(row=8, column=0, sticky="nw", pady=(6, 0))
         self.notes_text = tk.Text(form, height=8, wrap="word")
-        self.notes_text.grid(row=7, column=1, sticky="nsew", pady=(6, 0))
+        self.notes_text.grid(row=8, column=1, sticky="nsew", pady=(6, 0))
         notes_scroll = ttk.Scrollbar(form, orient="vertical", command=self.notes_text.yview)
         self.notes_text.configure(yscrollcommand=notes_scroll.set)
-        notes_scroll.grid(row=7, column=2, sticky="nsw")
+        notes_scroll.grid(row=8, column=2, sticky="nsw")
 
-        ttk.Label(form, textvariable=self.child_sum_var).grid(row=8, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(form, textvariable=self.child_sum_var).grid(row=9, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         # Status bar
         status = ttk.Label(self, textvariable=self.status_var, anchor="w")
@@ -265,6 +282,7 @@ class AllocationApp(ttk.Frame):
                 for row in reader:
                     if not row["name"].strip():
                         continue
+                    time_horizon = (row.get("time_horizon", "") or "").strip() or None
                     allocations.append(
                         Allocation(
                             id=int(row["id"]) if row["id"].strip() else None,
@@ -272,6 +290,7 @@ class AllocationApp(ttk.Frame):
                             name=row["name"].strip(),
                             currency=row["currency"].strip() or None,
                             instrument=row["instrument"].strip() or None,
+                            time_horizon=time_horizon,
                             target_percent=float(row["target_percent"] or 0.0),
                             include_in_rollup=row["include_in_rollup"].strip().lower() in {"1", "true", "yes"},
                             current_value=float(row["current_value"] or 0.0),
@@ -307,6 +326,7 @@ class AllocationApp(ttk.Frame):
                         "name",
                         "currency",
                         "instrument",
+                        "time_horizon",
                         "target_percent",
                         "include_in_rollup",
                         "current_value",
@@ -322,6 +342,7 @@ class AllocationApp(ttk.Frame):
                             allocation.name,
                             allocation.currency or "",
                             allocation.instrument or "",
+                            allocation.normalized_time_horizon,
                             f"{allocation.target_percent:.4f}",
                             int(allocation.include_in_rollup),
                             f"{allocation.current_value:.2f}",
@@ -425,6 +446,7 @@ class AllocationApp(ttk.Frame):
         notes = self.notes_text.get("1.0", "end").strip()
         currency = self.currency_var.get().strip() or None
         instrument = self.instrument_var.get().strip() or None
+        horizon = self.horizon_var.get().strip() or None
         include = bool(self.include_var.get())
 
         if self.mode == "add":
@@ -436,6 +458,7 @@ class AllocationApp(ttk.Frame):
                 name=name,
                 currency=currency,
                 instrument=instrument,
+                time_horizon=horizon,
                 target_percent=percent_value,
                 include_in_rollup=include,
                 notes=notes,
@@ -463,6 +486,7 @@ class AllocationApp(ttk.Frame):
             current.name = name
             current.currency = currency
             current.instrument = instrument
+            current.time_horizon = horizon
             current.target_percent = percent_value
             current.include_in_rollup = include
             current.notes = notes
@@ -533,6 +557,12 @@ class AllocationApp(ttk.Frame):
         allocations = self.repo.get_all_allocations()
         self.allocation_cache = {allocation.id: allocation for allocation in allocations}
 
+        unique_horizons = sorted(
+            {allocation.normalized_time_horizon for allocation in allocations if allocation.normalized_time_horizon}
+        )
+        combined_horizons = list(dict.fromkeys((*DEFAULT_TIME_HORIZONS, *unique_horizons)))
+        self.horizon_combo.configure(values=combined_horizons)
+
         nodes: Dict[int, TreeNode] = {}
         roots: list[TreeNode] = []
         for allocation in allocations:
@@ -595,6 +625,7 @@ class AllocationApp(ttk.Frame):
                 f"{own_share:.2f}%",
                 f"{cumulative:.2f}%",
                 "Yes" if allocation.include_in_rollup else "No",
+                allocation.normalized_time_horizon,
             ),
             open=True,
         )
@@ -628,6 +659,7 @@ class AllocationApp(ttk.Frame):
             self.value_entry,
         ):
             entry.config(state=state)
+        self.horizon_combo.config(state=state)
         self.include_check.config(state=state)
         if enabled:
             self.notes_text.config(state="normal")
@@ -638,6 +670,7 @@ class AllocationApp(ttk.Frame):
         self.name_var.set("")
         self.currency_var.set("")
         self.instrument_var.set("")
+        self.horizon_var.set("")
         self.percent_var.set("0")
         self.value_var.set("0")
         self.include_var.set(True)
@@ -649,6 +682,7 @@ class AllocationApp(ttk.Frame):
         self.name_var.set(allocation.name)
         self.currency_var.set(allocation.normalized_currency)
         self.instrument_var.set(allocation.normalized_instrument)
+        self.horizon_var.set(allocation.normalized_time_horizon)
         self.percent_var.set(f"{allocation.target_percent:.2f}")
         self.value_var.set(f"{allocation.current_value:.2f}")
         self.include_var.set(allocation.include_in_rollup)
@@ -704,6 +738,14 @@ class DistributionDialog(tk.Toplevel):
 
         self.amount_var = tk.StringVar(value="0")
         self.tolerance_var = tk.StringVar(value="2.0")
+        self.time_horizon_choices = self._build_time_horizon_choices()
+        default_horizon = (
+            self.time_horizon_choices[0]
+            if self.time_horizon_choices
+            else ALL_TIME_HORIZONS_OPTION
+        )
+        self.time_horizon_var = tk.StringVar(value=default_horizon)
+        self.selected_time_horizon_label = default_horizon
         self.summary_var = tk.StringVar(value="Enter an amount and press Calculate.")
 
         self.title("Distribute funds")
@@ -716,6 +758,7 @@ class DistributionDialog(tk.Toplevel):
 
         form = ttk.Frame(container)
         form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
         form.columnconfigure(4, weight=1)
 
         ttk.Label(form, text="Amount to distribute:").grid(row=0, column=0, sticky="w")
@@ -729,6 +772,18 @@ class DistributionDialog(tk.Toplevel):
 
         ttk.Button(form, text="Calculate", command=self._calculate_plan).grid(
             row=0, column=4, sticky="e"
+        )
+
+        ttk.Label(form, text="Time horizon:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.horizon_filter_combo = ttk.Combobox(
+            form,
+            textvariable=self.time_horizon_var,
+            values=self.time_horizon_choices,
+            state="readonly",
+            width=18,
+        )
+        self.horizon_filter_combo.grid(
+            row=1, column=1, sticky="w", padx=(4, 12), pady=(6, 0)
         )
 
         tree_frame = ttk.Frame(container)
@@ -789,6 +844,16 @@ class DistributionDialog(tk.Toplevel):
 
         amount_entry.focus_set()
 
+    def _build_time_horizon_choices(self) -> list[str]:
+        allocations = self.repo.get_all_allocations()
+        unique_horizons = sorted(
+            {allocation.normalized_time_horizon for allocation in allocations if allocation.normalized_time_horizon}
+        )
+        combined = list(dict.fromkeys((*DEFAULT_TIME_HORIZONS, *unique_horizons)))
+        if combined:
+            return [ALL_TIME_HORIZONS_OPTION, *combined]
+        return [ALL_TIME_HORIZONS_OPTION]
+
     # ------------------------------------------------------------------
     # Plan calculation
     # ------------------------------------------------------------------
@@ -819,14 +884,31 @@ class DistributionDialog(tk.Toplevel):
             )
             return
 
-        plan_rows, totals, instrument_summaries = self._build_plan(amount, tolerance)
+        selected_label = self.time_horizon_var.get().strip()
+        if not selected_label:
+            selected_label = ALL_TIME_HORIZONS_OPTION
+        horizon_filter = (
+            None if selected_label == ALL_TIME_HORIZONS_OPTION else selected_label
+        )
+        self.selected_time_horizon_label = selected_label
+        plan_rows, totals, instrument_summaries = self._build_plan(
+            amount, tolerance, horizon_filter
+        )
         if not plan_rows:
-            messagebox.showinfo(
-                "No included allocations",
-                "None of the allocations are marked as included in the roll-up, therefore no "
-                "distribution recommendations can be produced.",
-                parent=self,
-            )
+            if horizon_filter is None:
+                messagebox.showinfo(
+                    "No included allocations",
+                    "None of the allocations are marked as included in the roll-up, therefore no "
+                    "distribution recommendations can be produced.",
+                    parent=self,
+                )
+            else:
+                messagebox.showinfo(
+                    "No matching allocations",
+                    "No allocations match the selected time horizon. Adjust the filter or "
+                    "update the allocation horizons and try again.",
+                    parent=self,
+                )
             self.tree.delete(*self.tree.get_children())
             self.summary_var.set("No plan available. Update your allocations and try again.")
             self.save_button.config(state="disabled")
@@ -914,10 +996,12 @@ class DistributionDialog(tk.Toplevel):
             f"Target total: {_format_amount(self.totals.get('target_total', 0.0))} (deposit {_format_amount(self.amount)})",
             f"Invest: {_format_amount(invest_total)} | Divest: {_format_amount(divest_total)}",
         ]
+        if self.selected_time_horizon_label:
+            summary_lines.append(f"Time horizon: {self.selected_time_horizon_label}")
         self.summary_var.set("\n".join(summary_lines))
 
     def _build_plan(
-        self, amount: float, tolerance: float
+        self, amount: float, tolerance: float, time_horizon: Optional[str]
     ) -> tuple[list[PlanRow], dict[str, float], list[InstrumentSummary]]:
         allocations = self.repo.get_all_allocations()
         nodes: dict[int, TreeNode] = {}
@@ -951,29 +1035,55 @@ class DistributionDialog(tk.Toplevel):
         sort_children(roots)
         roots.sort(key=lambda n: (n.allocation.sort_order, n.allocation.id or 0))
 
-        contribute_cache: dict[int, bool] = {}
+        def normalize_horizon(value: Optional[str]) -> Optional[str]:
+            if value is None:
+                return None
+            stripped = value.strip()
+            return stripped if stripped else None
 
-        def contributes(node: TreeNode) -> bool:
-            key = node.allocation.id if node.allocation.id is not None else id(node)
+        time_horizon = normalize_horizon(time_horizon)
+
+        contribute_cache: dict[tuple[int, Optional[str]], bool] = {}
+
+        def contributes(node: TreeNode, inherited: Optional[str]) -> bool:
+            node_id = node.allocation.id if node.allocation.id is not None else id(node)
+            key = (node_id, inherited)
             if key in contribute_cache:
                 return contribute_cache[key]
-            contributes_value = node.allocation.include_in_rollup or any(
-                contributes(child) for child in node.children
+            node_horizon = normalize_horizon(node.allocation.time_horizon) or inherited
+            child_contributions = [contributes(child, node_horizon) for child in node.children]
+            has_contributing_child = any(child_contributions)
+            matches_leaf = (
+                node.allocation.include_in_rollup
+                and not has_contributing_child
+                and (time_horizon is None or node_horizon == time_horizon)
             )
-            contribute_cache[key] = contributes_value
-            return contributes_value
+            result = matches_leaf or has_contributing_child
+            contribute_cache[key] = result
+            return result
 
         plan_rows: list[PlanRow] = []
 
-        def gather(node: TreeNode, parent_share: float, path: list[str]) -> None:
+        def gather(
+            node: TreeNode,
+            parent_share: float,
+            path: list[str],
+            inherited: Optional[str],
+        ) -> None:
             allocation = node.allocation
             if allocation.id is None:
                 return
             own_share = allocation.target_percent
             cumulative_share = parent_share * (own_share / 100.0)
             current_path = path + [allocation.name]
-            included_children = [child for child in node.children if contributes(child)]
-            if allocation.include_in_rollup and not included_children:
+            node_horizon = normalize_horizon(allocation.time_horizon) or inherited
+            included_children = [child for child in node.children if contributes(child, node_horizon)]
+            is_matching_leaf = (
+                allocation.include_in_rollup
+                and not included_children
+                and (time_horizon is None or node_horizon == time_horizon)
+            )
+            if is_matching_leaf:
                 plan_rows.append(
                     PlanRow(
                         allocation_id=allocation.id,
@@ -993,11 +1103,19 @@ class DistributionDialog(tk.Toplevel):
             next_parent_share = cumulative_share
 
             for child in included_children:
-                gather(child, next_parent_share, current_path)
+                gather(child, next_parent_share, current_path, node_horizon)
 
         for root in roots:
-            if contributes(root):
-                gather(root, 100.0, [])
+            if contributes(root, None):
+                gather(root, 100.0, [], None)
+
+        total_target_share = sum(row.target_share for row in plan_rows)
+        if math.isclose(total_target_share, 0.0, abs_tol=1e-9):
+            for row in plan_rows:
+                row.target_share = 0.0
+        else:
+            for row in plan_rows:
+                row.target_share = row.target_share / total_target_share * 100.0
 
         total_current = sum(row.current_value for row in plan_rows)
         target_total = total_current + amount

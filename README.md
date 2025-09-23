@@ -11,6 +11,7 @@ It stores your allocations in a local SQLite database (`allocations.db`) and pro
 - Record the current monetary value for every allocation and update it as prices move.
 - Mark buckets as *included* or *excluded* from the aggregated roll-up percentages.
 - Attach notes to every allocation for additional context.
+- Categorise allocations by time horizon and inherit that classification down the hierarchy.
 - Generate distribution recommendations for new deposits or rebalancing, including invest/divest guidance based on a tolerance you choose.
 - Import a comprehensive sample dataset or replace your data from a CSV export.
 - Export the current database contents to CSV for backups or further processing.
@@ -45,13 +46,14 @@ On first launch an empty database is created next to the Python modules. Use **F
 - The form on the right displays the details of the selection and exposes fields when you are adding or editing items.
 - Update the **Current value** field whenever the value of an allocation changes (for example after a price movement).
 - Use the **Instrument** field on leaf allocations to label positions that should be aggregated when rebalancing.
+- Assign a **Time horizon** to parents or leaves. Empty children inherit the value from the closest ancestor, which can later be used to scope distributions.
 - The **Tools** menu hosts the distribution calculator and the distribution history browser.
 
 The *Children share* label helps you verify that the percentages of the immediate children sum up correctly for the selected parent.
 
 ## Distributing money
 
-Use **Tools → Distribute funds…** to enter the amount you would like to allocate and the maximum deviation (in percentage points) you are willing to tolerate. The dialog calculates the target value for every included allocation, highlights which buckets need investment or divestment and allows you to save the plan to the database.
+Use **Tools → Distribute funds…** to enter the amount you would like to allocate and the maximum deviation (in percentage points) you are willing to tolerate. Optionally select a time horizon to recalculate the target percentages using only leaves that match that classification. The dialog calculates the target value for every included allocation, highlights which buckets need investment or divestment and allows you to save the plan to the database.
 
 Saved plans can be reviewed or deleted via **Tools → Distribution history…**. The history view shows the recorded totals, the tolerance that was used and the recommended actions for each allocation.
 
@@ -66,13 +68,14 @@ Exports contain the following columns:
 | `name` | Display name of the bucket. |
 | `currency` | Optional currency label. |
 | `instrument` | Optional instrument label used for aggregation in distribution plans. |
+| `time_horizon` | Optional textual descriptor (for example *Short term*, *Long term*). |
 | `target_percent` | Share of the parent bucket expressed as a percentage. |
 | `include_in_rollup` | `1` if the allocation contributes to the overall totals, otherwise `0`. |
 | `current_value` | Tracked monetary value of the allocation. |
 | `notes` | Free-form description or comments. |
 | `sort_order` | Integer describing the order of siblings. |
 
-When importing from CSV you must keep these columns (you can edit the values).
+When importing from CSV you must keep these columns (you can edit the values). Older exports that do not yet contain the `time_horizon` column are still supported; empty values are treated as "no classification".
 The application clears the current database before inserting the imported rows.
 
 ## Database location
