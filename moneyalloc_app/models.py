@@ -1,8 +1,84 @@
 """Data models for the Money Allocation application."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
+
+_TIME_HORIZON_ALIASES: dict[str, str] = {
+    "y": "Y",
+    "yr": "Y",
+    "yrs": "Y",
+    "year": "Y",
+    "years": "Y",
+    "m": "M",
+    "mo": "M",
+    "mos": "M",
+    "month": "M",
+    "months": "M",
+    "w": "W",
+    "wk": "W",
+    "wks": "W",
+    "week": "W",
+    "weeks": "W",
+    "d": "D",
+    "day": "D",
+    "days": "D",
+}
+
+_CANONICAL_HORIZON_PATTERN = re.compile(r"^(\d+)\s*([ymwd])$", re.IGNORECASE)
+_TEXTUAL_HORIZON_PATTERN = re.compile(r"^(\d+)\s*([a-z]+)$", re.IGNORECASE)
+
+
+def canonicalize_time_horizon(value: Optional[str]) -> Optional[str]:
+    """Return the canonical representation of a time horizon.
+
+    The canonical format uses an integer followed by an upper-case unit letter:
+    ``Y`` for years, ``M`` for months, ``W`` for weeks and ``D`` for days. The
+    function accepts common textual variations such as ``"1 year"`` or
+    ``"6 months"`` and converts them to ``"1Y"`` or ``"6M"`` respectively. When
+    the value is empty ``None`` is returned. A :class:`ValueError` is raised for
+    unrecognised formats.
+    """
+
+    if value is None:
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+
+    canonical_match = _CANONICAL_HORIZON_PATTERN.fullmatch(text)
+    if canonical_match:
+        number, unit = canonical_match.groups()
+        numeric = int(number)
+        if numeric <= 0:
+            raise ValueError(f"Time horizon must be positive: {value!r}")
+        return f"{numeric}{unit.upper()}"
+
+    textual_match = _TEXTUAL_HORIZON_PATTERN.fullmatch(text)
+    if textual_match:
+        number, unit_text = textual_match.groups()
+        numeric = int(number)
+        if numeric <= 0:
+            raise ValueError(f"Time horizon must be positive: {value!r}")
+        mapped_unit = _TIME_HORIZON_ALIASES.get(unit_text.lower())
+        if mapped_unit:
+            return f"{numeric}{mapped_unit}"
+
+    raise ValueError(f"Invalid time horizon value: {value!r}")
+
+
+def display_time_horizon(value: Optional[str]) -> str:
+    """Return a display-friendly time horizon string."""
+
+    if value is None:
+        return ""
+    try:
+        canonical = canonicalize_time_horizon(value)
+    except ValueError:
+        return value.strip()
+    return canonical or ""
 
 
 @dataclass(slots=True)
@@ -34,7 +110,7 @@ class Allocation:
     @property
     def normalized_time_horizon(self) -> str:
         """Return the time horizon string suitable for display."""
-        return (self.time_horizon or "").strip()
+        return display_time_horizon(self.time_horizon)
 
 
 @dataclass(slots=True)
@@ -66,4 +142,10 @@ class DistributionEntry:
     action: str
 
 
-__all__ = ["Allocation", "Distribution", "DistributionEntry"]
+__all__ = [
+    "Allocation",
+    "Distribution",
+    "DistributionEntry",
+    "canonicalize_time_horizon",
+    "display_time_horizon",
+]

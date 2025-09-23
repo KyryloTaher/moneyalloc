@@ -46,7 +46,7 @@ On first launch an empty database is created next to the Python modules. Use **F
 - The form on the right displays the details of the selection and exposes fields when you are adding or editing items.
 - Update the **Current value** field whenever the value of an allocation changes (for example after a price movement).
 - Use the **Instrument** field on leaf allocations to label positions that should be aggregated when rebalancing.
-- Assign a **Time horizon** to parents or leaves. Empty children inherit the value from the closest ancestor, which can later be used to scope distributions.
+- Assign a **Time horizon** to parents or leaves using the `number + unit` format (for example `1Y`, `3M`, `6W` or `10D`). Empty children inherit the value from the closest ancestor, which can later be used to scope distributions.
 - The **Tools** menu hosts the distribution calculator and the distribution history browser.
 
 The *Children share* label helps you verify that the percentages of the immediate children sum up correctly for the selected parent.
