@@ -14,6 +14,7 @@ class AllocationSeed:
     target_percent: float
     currency: Optional[str] = None
     instrument: Optional[str] = None
+    time_horizon: Optional[str] = None
     include: bool = True
     notes: str = ""
     children: Iterable["AllocationSeed"] | None = None
@@ -29,6 +30,7 @@ class AllocationSeed:
             include_in_rollup=self.include,
             notes=self.notes,
             sort_order=repo.get_next_sort_order(parent_id),
+            time_horizon=self.time_horizon,
         )
 
 

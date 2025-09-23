@@ -38,6 +38,7 @@ class AllocationRepository:
                     name TEXT NOT NULL,
                     currency TEXT,
                     instrument TEXT,
+                    time_horizon TEXT,
                     target_percent REAL NOT NULL DEFAULT 0.0,
                     include_in_rollup INTEGER NOT NULL DEFAULT 1,
                     notes TEXT,
@@ -61,6 +62,8 @@ class AllocationRepository:
                 conn.execute(
                     "ALTER TABLE allocations ADD COLUMN current_value REAL NOT NULL DEFAULT 0.0"
                 )
+            if "time_horizon" not in columns:
+                conn.execute("ALTER TABLE allocations ADD COLUMN time_horizon TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS distributions (
@@ -135,19 +138,21 @@ class AllocationRepository:
                     name,
                     currency,
                     instrument,
+                    time_horizon,
                     target_percent,
                     include_in_rollup,
                     notes,
                     sort_order,
                     current_value
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     allocation.parent_id,
                     allocation.name,
                     allocation.currency,
                     allocation.instrument,
+                    allocation.time_horizon,
                     allocation.target_percent,
                     1 if allocation.include_in_rollup else 0,
                     allocation.notes,
@@ -173,7 +178,8 @@ class AllocationRepository:
                     include_in_rollup = ?,
                     notes = ?,
                     sort_order = ?,
-                    current_value = ?
+                    current_value = ?,
+                    time_horizon = ?
                 WHERE id = ?
                 """,
                 (
@@ -186,6 +192,7 @@ class AllocationRepository:
                     allocation.notes,
                     allocation.sort_order,
                     allocation.current_value,
+                    allocation.time_horizon,
                     allocation.id,
                 ),
             )
@@ -211,13 +218,14 @@ class AllocationRepository:
                     name,
                     currency,
                     instrument,
+                    time_horizon,
                     target_percent,
                     include_in_rollup,
                     notes,
                     sort_order,
                     current_value
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -226,6 +234,7 @@ class AllocationRepository:
                         item.name,
                         item.currency,
                         item.instrument,
+                        item.time_horizon,
                         item.target_percent,
                         1 if item.include_in_rollup else 0,
                         item.notes,
@@ -253,6 +262,7 @@ class AllocationRepository:
             notes=row["notes"] or "",
             sort_order=int(row["sort_order"] or 0),
             current_value=float(row["current_value"] or 0.0),
+            time_horizon=row["time_horizon"],
         )
 
     # ------------------------------------------------------------------
