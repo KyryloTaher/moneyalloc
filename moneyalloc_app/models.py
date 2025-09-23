@@ -19,6 +19,7 @@ class Allocation:
     notes: str
     sort_order: int = 0
     current_value: float = 0.0
+    time_horizon: Optional[str] = None
 
     @property
     def normalized_currency(self) -> str:
@@ -29,6 +30,11 @@ class Allocation:
     def normalized_instrument(self) -> str:
         """Return the instrument string suitable for display."""
         return (self.instrument or "").strip()
+
+    @property
+    def normalized_time_horizon(self) -> str:
+        """Return the time horizon string suitable for display."""
+        return (self.time_horizon or "").strip()
 
 
 @dataclass(slots=True)
