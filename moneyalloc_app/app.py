@@ -11,11 +11,21 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Callable, Dict, Iterable, List, Optional
 
 from .db import AllocationRepository
-from .models import Allocation, Distribution, DistributionEntry
+from .models import Allocation, Distribution, DistributionEntry, canonicalize_time_horizon
 from .sample_data import populate_with_sample_data
 
 
-DEFAULT_TIME_HORIZONS: tuple[str, ...] = ("Short term", "Medium term", "Long term")
+DEFAULT_TIME_HORIZONS: tuple[str, ...] = (
+    "1D",
+    "1W",
+    "2W",
+    "1M",
+    "3M",
+    "6M",
+    "1Y",
+    "3Y",
+    "5Y",
+)
 ALL_TIME_HORIZONS_OPTION = "All time horizons"
 
 
@@ -280,14 +290,21 @@ class AllocationApp(ttk.Frame):
                     missing = required.difference(reader.fieldnames or [])
                     raise ValueError(f"Missing columns in CSV: {', '.join(sorted(missing))}")
                 for row in reader:
-                    if not row["name"].strip():
+                    name = row["name"].strip()
+                    if not name:
                         continue
-                    time_horizon = (row.get("time_horizon", "") or "").strip() or None
+                    try:
+                        time_horizon = canonicalize_time_horizon(row.get("time_horizon"))
+                    except ValueError as exc:
+                        raise ValueError(
+                            "Time horizon must follow the '<number><unit>' pattern (e.g. 1Y, 3M, 6W or 10D) "
+                            f"for allocation '{name}'."
+                        ) from exc
                     allocations.append(
                         Allocation(
                             id=int(row["id"]) if row["id"].strip() else None,
                             parent_id=int(row["parent_id"]) if row["parent_id"].strip() else None,
-                            name=row["name"].strip(),
+                            name=name,
                             currency=row["currency"].strip() or None,
                             instrument=row["instrument"].strip() or None,
                             time_horizon=time_horizon,
@@ -446,7 +463,16 @@ class AllocationApp(ttk.Frame):
         notes = self.notes_text.get("1.0", "end").strip()
         currency = self.currency_var.get().strip() or None
         instrument = self.instrument_var.get().strip() or None
-        horizon = self.horizon_var.get().strip() or None
+        try:
+            horizon = canonicalize_time_horizon(self.horizon_var.get())
+        except ValueError:
+            messagebox.showerror(
+                "Invalid time horizon",
+                "Time horizon must be a positive integer followed by Y, M, W or D "
+                "(for example 1Y, 3M, 6W or 10D).",
+            )
+            return
+        self.horizon_var.set(horizon or "")
         include = bool(self.include_var.get())
 
         if self.mode == "add":
@@ -885,12 +911,19 @@ class DistributionDialog(tk.Toplevel):
             return
 
         selected_label = self.time_horizon_var.get().strip()
-        if not selected_label:
-            selected_label = ALL_TIME_HORIZONS_OPTION
-        horizon_filter = (
-            None if selected_label == ALL_TIME_HORIZONS_OPTION else selected_label
-        )
-        self.selected_time_horizon_label = selected_label
+        if not selected_label or selected_label == ALL_TIME_HORIZONS_OPTION:
+            horizon_filter = None
+            display_label = ALL_TIME_HORIZONS_OPTION
+            self.time_horizon_var.set(display_label)
+        else:
+            try:
+                canonical_label = canonicalize_time_horizon(selected_label)
+            except ValueError:
+                canonical_label = selected_label
+            horizon_filter = canonical_label
+            display_label = canonical_label
+            self.time_horizon_var.set(display_label)
+        self.selected_time_horizon_label = display_label
         plan_rows, totals, instrument_summaries = self._build_plan(
             amount, tolerance, horizon_filter
         )
@@ -1038,8 +1071,11 @@ class DistributionDialog(tk.Toplevel):
         def normalize_horizon(value: Optional[str]) -> Optional[str]:
             if value is None:
                 return None
-            stripped = value.strip()
-            return stripped if stripped else None
+            try:
+                return canonicalize_time_horizon(value)
+            except ValueError:
+                stripped = value.strip() if isinstance(value, str) else ""
+                return stripped if stripped else None
 
         time_horizon = normalize_horizon(time_horizon)
 
