@@ -13,6 +13,11 @@ from typing import Callable, Dict, Iterable, List, Optional
 from .db import AllocationRepository
 from .models import Allocation, Distribution, DistributionEntry, canonicalize_time_horizon
 from .sample_data import populate_with_sample_data
+from .risk_optimizer import (
+    ProblemSpec,
+    RiskOptimizationResult,
+    run_risk_equal_optimization,
+)
 
 
 DEFAULT_TIME_HORIZONS: tuple[str, ...] = (
@@ -29,6 +34,59 @@ DEFAULT_TIME_HORIZONS: tuple[str, ...] = (
 ALL_TIME_HORIZONS_OPTION = "All time horizons"
 
 
+RISK_BUCKET_PARAMETERS: dict[str, dict[str, dict[str, float]]] = {
+    "T+1_invest": {
+        "rates": {"yield": 5.00, "duration": 0.08},
+        "credit": {"yield": 5.40, "duration": 0.25},
+    },
+    "3M": {
+        "rates": {"yield": 4.90, "duration": 0.25},
+        "credit": {"yield": 5.30, "duration": 0.50},
+    },
+    "1Y": {
+        "rates": {"yield": 4.70, "duration": 1.00},
+        "credit": {"yield": 5.60, "duration": 2.00},
+    },
+    "3Y": {
+        "rates": {"yield": 4.20, "duration": 2.80},
+        "tips": {"yield": 3.00, "duration": 2.50},
+        "credit": {"yield": 6.00, "duration": 3.00},
+    },
+    "30Y": {
+        "rates": {"yield": 4.50, "duration": 15.70},
+        "tips": {"yield": 3.50, "duration": 18.90},
+        "credit": {"yield": 6.30, "duration": 12.30},
+    },
+}
+
+
+def _map_horizon_to_risk_bucket(canonical: Optional[str]) -> Optional[str]:
+    """Translate a canonical time horizon into a risk bucket name."""
+
+    if not canonical:
+        return None
+    unit = canonical[-1].upper()
+    try:
+        amount = int(canonical[:-1])
+    except ValueError:
+        return None
+    if unit in {"D", "W"}:
+        return "T+1_invest"
+    if unit == "M":
+        if amount <= 1:
+            return "T+1_invest"
+        if amount <= 6:
+            return "3M"
+        return "1Y"
+    if unit == "Y":
+        if amount <= 1:
+            return "1Y"
+        if amount <= 5:
+            return "3Y"
+        return "30Y"
+    return None
+
+
 @dataclass
 class TreeNode:
     allocation: Allocation
@@ -43,6 +101,7 @@ class PlanRow:
     path: str
     instrument: str
     currency: str
+    time_horizon: Optional[str]
     target_share: float
     current_value: float
     current_share: float
@@ -773,6 +832,8 @@ class DistributionDialog(tk.Toplevel):
         self.time_horizon_var = tk.StringVar(value=default_horizon)
         self.selected_time_horizon_label = default_horizon
         self.summary_var = tk.StringVar(value="Enter an amount and press Calculate.")
+        self.risk_summary_lines: list[str] = []
+        self.risk_result: Optional[RiskOptimizationResult] = None
 
         self.title("Distribute funds")
         self.transient(master)
@@ -884,6 +945,8 @@ class DistributionDialog(tk.Toplevel):
     # Plan calculation
     # ------------------------------------------------------------------
     def _calculate_plan(self) -> None:
+        self.risk_summary_lines = []
+        self.risk_result = None
         try:
             amount = float(self.amount_var.get())
         except ValueError:
@@ -947,6 +1010,8 @@ class DistributionDialog(tk.Toplevel):
             self.save_button.config(state="disabled")
             self.plan_rows = []
             self.instrument_summaries = []
+            self.risk_summary_lines = []
+            self.risk_result = None
             return
 
         self.plan_rows = plan_rows
@@ -954,6 +1019,7 @@ class DistributionDialog(tk.Toplevel):
         self.amount = amount
         self.tolerance = tolerance
         self.totals = totals
+        self.risk_summary_lines, self.risk_result = self._build_risk_summary(plan_rows)
         self._populate_tree()
         self.save_button.config(state="normal")
 
@@ -1031,7 +1097,113 @@ class DistributionDialog(tk.Toplevel):
         ]
         if self.selected_time_horizon_label:
             summary_lines.append(f"Time horizon: {self.selected_time_horizon_label}")
+        if self.risk_summary_lines:
+            summary_lines.append("")
+            summary_lines.extend(self.risk_summary_lines)
         self.summary_var.set("\n".join(summary_lines))
+
+    def _build_risk_summary(
+        self, plan_rows: list[PlanRow]
+    ) -> tuple[list[str], Optional[RiskOptimizationResult]]:
+        bucket_shares: dict[str, float] = {}
+        for row in plan_rows:
+            bucket = _map_horizon_to_risk_bucket(row.time_horizon)
+            if not bucket:
+                continue
+            bucket_shares[bucket] = bucket_shares.get(bucket, 0.0) + row.target_share
+
+        if not bucket_shares:
+            return [], None
+
+        total_share = sum(bucket_shares.values())
+        if math.isclose(total_share, 0.0, abs_tol=1e-9):
+            return [], None
+
+        positive_shares = {bucket: share for bucket, share in bucket_shares.items() if share > 0.0}
+        if not positive_shares:
+            return [], None
+
+        normaliser = sum(positive_shares.values())
+        if math.isclose(normaliser, 0.0, abs_tol=1e-9):
+            return [], None
+
+        bucket_weights = {
+            bucket: share / normaliser * 100.0 for bucket, share in positive_shares.items()
+        }
+
+        missing_parameters = [
+            bucket for bucket in bucket_weights if bucket not in RISK_BUCKET_PARAMETERS
+        ]
+        if missing_parameters:
+            missing_list = ", ".join(sorted(missing_parameters))
+            return (
+                [
+                    "Risk summary:",
+                    f"  Missing risk configuration for: {missing_list}.",
+                    "  Update the RISK_BUCKET_PARAMETERS table to include yields and durations.",
+                ],
+                None,
+            )
+
+        rates_yields: dict[str, Optional[float]] = {}
+        tips_yields: dict[str, Optional[float]] = {}
+        credit_yields: dict[str, Optional[float]] = {}
+        durations: dict[tuple[str, str], float] = {}
+
+        for bucket in bucket_weights:
+            params = RISK_BUCKET_PARAMETERS[bucket]
+            rates = params.get("rates")
+            tips = params.get("tips")
+            credit = params.get("credit")
+            rates_yields[bucket] = float(rates["yield"]) if rates and "yield" in rates else None
+            tips_yields[bucket] = float(tips["yield"]) if tips and "yield" in tips else None
+            credit_yields[bucket] = (
+                float(credit["yield"]) if credit and "yield" in credit else None
+            )
+            if rates and "duration" in rates:
+                durations[(bucket, "rates")] = float(rates["duration"])
+            if tips and "duration" in tips:
+                durations[(bucket, "tips")] = float(tips["duration"])
+            if credit and "duration" in credit:
+                durations[(bucket, "credit")] = float(credit["duration"])
+
+        spec = ProblemSpec(
+            bucket_weights=bucket_weights,
+            rates_yields=rates_yields,
+            tips_yields=tips_yields,
+            credit_yields=credit_yields,
+            durations=durations,
+        )
+
+        try:
+            optimisation = run_risk_equal_optimization(spec)
+        except (RuntimeError, ValueError) as exc:
+            return (
+                [
+                    "Risk summary:",
+                    f"  {exc}",
+                ],
+                None,
+            )
+
+        lines = [
+            "Risk summary (equalised risk across sleeves):",
+            f"  Portfolio carry: {optimisation.portfolio_yield * 100:.2f}%",
+            "  Equal per-bp risk:",
+            f"    Rates DV01: {optimisation.K_rates:.6f}",
+            f"    TIPS  DV01: {optimisation.K_tips:.6f}",
+            f"    Credit CS01: {optimisation.K_credit:.6f}",
+            "  Bucket weights considered:",
+        ]
+
+        for bucket in sorted(bucket_weights, key=lambda name: (-bucket_weights[name], name)):
+            lines.append(f"    {bucket}: {bucket_weights[bucket]:.2f}%")
+
+        lines.append("  Sleeve allocation (share of investable portion):")
+        for sleeve, total in sorted(optimisation.by_sleeve.items()):
+            lines.append(f"    {sleeve.capitalize()}: {total * 100:.2f}%")
+
+        return lines, optimisation
 
     def _build_plan(
         self, amount: float, tolerance: float, time_horizon: Optional[str]
@@ -1126,6 +1298,7 @@ class DistributionDialog(tk.Toplevel):
                         path=" > ".join(current_path),
                         instrument=allocation.normalized_instrument,
                         currency=allocation.normalized_currency,
+                        time_horizon=node_horizon,
                         target_share=cumulative_share,
                         current_value=allocation.current_value,
                         current_share=0.0,
