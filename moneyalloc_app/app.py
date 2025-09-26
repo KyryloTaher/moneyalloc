@@ -34,57 +34,113 @@ DEFAULT_TIME_HORIZONS: tuple[str, ...] = (
 ALL_TIME_HORIZONS_OPTION = "All time horizons"
 
 
-RISK_BUCKET_PARAMETERS: dict[str, dict[str, dict[str, float]]] = {
-    "T+1_invest": {
-        "rates": {"yield": 5.00, "duration": 0.08},
-        "credit": {"yield": 5.40, "duration": 0.25},
-    },
-    "3M": {
-        "rates": {"yield": 4.90, "duration": 0.25},
-        "credit": {"yield": 5.30, "duration": 0.50},
-    },
-    "1Y": {
-        "rates": {"yield": 4.70, "duration": 1.00},
-        "credit": {"yield": 5.60, "duration": 2.00},
-    },
-    "3Y": {
-        "rates": {"yield": 4.20, "duration": 2.80},
-        "tips": {"yield": 3.00, "duration": 2.50},
-        "credit": {"yield": 6.00, "duration": 3.00},
-    },
-    "30Y": {
-        "rates": {"yield": 4.50, "duration": 15.70},
-        "tips": {"yield": 3.50, "duration": 18.90},
-        "credit": {"yield": 6.30, "duration": 12.30},
-    },
-}
+class HorizonRiskDialog(simpledialog.Dialog):
+    """Dialog that captures risk inputs for each time horizon."""
 
+    _SLEEVES: tuple[tuple[str, str, str], ...] = (
+        ("rates", "Government (DV01) yield", "Government tenor"),
+        ("tips", "Inflation (BE01) yield", "Inflation tenor"),
+        ("credit", "Credit (CS01) yield", "Credit tenor"),
+    )
 
-def _map_horizon_to_risk_bucket(canonical: Optional[str]) -> Optional[str]:
-    """Translate a canonical time horizon into a risk bucket name."""
+    def __init__(
+        self,
+        parent: tk.Misc,
+        horizons: Iterable[str],
+        initial: Optional[dict[str, dict[str, tuple[float, float]]]] = None,
+    ) -> None:
+        self.horizons = list(dict.fromkeys(horizons))
+        self.horizons.sort()
+        self.initial = initial or {}
+        self._vars: dict[tuple[str, str, str], tk.StringVar] = {}
+        self.result: Optional[dict[str, dict[str, tuple[float, float]]]] = None
+        super().__init__(parent, title="Configure risk inputs")
 
-    if not canonical:
-        return None
-    unit = canonical[-1].upper()
-    try:
-        amount = int(canonical[:-1])
-    except ValueError:
-        return None
-    if unit in {"D", "W"}:
-        return "T+1_invest"
-    if unit == "M":
-        if amount <= 1:
-            return "T+1_invest"
-        if amount <= 6:
-            return "3M"
-        return "1Y"
-    if unit == "Y":
-        if amount <= 1:
-            return "1Y"
-        if amount <= 5:
-            return "3Y"
-        return "30Y"
-    return None
+    def body(self, master: tk.Widget) -> Optional[tk.Widget]:
+        ttk.Label(master, text="Time horizon").grid(row=0, column=0, padx=4, pady=4)
+        for col, (_sleeve, yield_label, tenor_label) in enumerate(self._SLEEVES, start=1):
+            ttk.Label(master, text=yield_label).grid(row=0, column=2 * col - 1, padx=4, pady=4)
+            ttk.Label(master, text=f"{tenor_label} (years)").grid(
+                row=0, column=2 * col, padx=4, pady=4
+            )
+
+        focus_widget: Optional[tk.Widget] = None
+        for row_index, horizon in enumerate(self.horizons, start=1):
+            ttk.Label(master, text=horizon).grid(row=row_index, column=0, sticky="w", padx=4, pady=2)
+            for col_index, (sleeve, _yield_label, _tenor_label) in enumerate(
+                self._SLEEVES, start=1
+            ):
+                yield_var = tk.StringVar()
+                tenor_var = tk.StringVar()
+                initial_sleeve = self.initial.get(horizon, {}).get(sleeve)
+                if initial_sleeve:
+                    yield_var.set(f"{initial_sleeve[0]:.4f}")
+                    tenor_var.set(f"{initial_sleeve[1]:.4f}")
+                yield_entry = ttk.Entry(master, textvariable=yield_var, width=12)
+                tenor_entry = ttk.Entry(master, textvariable=tenor_var, width=10)
+                yield_entry.grid(row=row_index, column=2 * col_index - 1, padx=4, pady=2)
+                tenor_entry.grid(row=row_index, column=2 * col_index, padx=4, pady=2)
+                self._vars[(horizon, sleeve, "yield")] = yield_var
+                self._vars[(horizon, sleeve, "tenor")] = tenor_var
+                if focus_widget is None:
+                    focus_widget = yield_entry
+        return focus_widget
+
+    def validate(self) -> bool:
+        data: dict[str, dict[str, tuple[float, float]]] = {}
+        for horizon in self.horizons:
+            horizon_data: dict[str, tuple[float, float]] = {}
+            for sleeve, _yield_label, _tenor_label in self._SLEEVES:
+                yield_value = self._vars[(horizon, sleeve, "yield")].get().strip()
+                tenor_value = self._vars[(horizon, sleeve, "tenor")].get().strip()
+                if not yield_value and not tenor_value:
+                    continue
+                if not yield_value or not tenor_value:
+                    messagebox.showerror(
+                        "Incomplete risk input",
+                        "Please provide both yield and tenor for the selected instrument.",
+                        parent=self,
+                    )
+                    return False
+                try:
+                    yield_float = float(yield_value)
+                    tenor_float = float(tenor_value)
+                except ValueError:
+                    messagebox.showerror(
+                        "Invalid risk input",
+                        "Yields and tenors must be numeric values.",
+                        parent=self,
+                    )
+                    return False
+                if tenor_float <= 0:
+                    messagebox.showerror(
+                        "Invalid tenor",
+                        "Tenor must be a positive value.",
+                        parent=self,
+                    )
+                    return False
+                horizon_data[sleeve] = (yield_float, tenor_float)
+            if not horizon_data:
+                messagebox.showerror(
+                    "Missing instruments",
+                    f"Provide at least one instrument for time horizon {horizon}.",
+                    parent=self,
+                )
+                return False
+            data[horizon] = horizon_data
+        if not data:
+            messagebox.showerror(
+                "Missing instruments",
+                "Provide at least one instrument to calculate risk metrics.",
+                parent=self,
+            )
+            return False
+        self.result = data
+        return True
+
+    def apply(self) -> None:
+        # Result already stored in validate.
+        pass
 
 
 @dataclass
@@ -99,24 +155,8 @@ class PlanRow:
 
     allocation_id: int
     path: str
-    instrument: str
     currency: str
     time_horizon: Optional[str]
-    target_share: float
-    current_value: float
-    current_share: float
-    target_value: float
-    recommended_change: float
-    share_diff: float
-    action: str
-
-
-@dataclass(slots=True)
-class InstrumentSummary:
-    """Aggregated recommendation metrics for a single instrument."""
-
-    name: str
-    currency: str
     target_share: float
     current_value: float
     current_share: float
@@ -811,7 +851,6 @@ class DistributionDialog(tk.Toplevel):
         self.repo = repo
         self.on_saved = on_saved
         self.plan_rows: list[PlanRow] = []
-        self.instrument_summaries: list[InstrumentSummary] = []
         self.amount: float = 0.0
         self.tolerance: float = 0.0
         self.totals: dict[str, float] = {
@@ -820,6 +859,7 @@ class DistributionDialog(tk.Toplevel):
             "invest_total": 0.0,
             "divest_total": 0.0,
         }
+        self._risk_inputs: dict[str, dict[str, tuple[float, float]]] = {}
 
         self.amount_var = tk.StringVar(value="0")
         self.tolerance_var = tk.StringVar(value="2.0")
@@ -987,7 +1027,7 @@ class DistributionDialog(tk.Toplevel):
             display_label = canonical_label
             self.time_horizon_var.set(display_label)
         self.selected_time_horizon_label = display_label
-        plan_rows, totals, instrument_summaries = self._build_plan(
+        plan_rows, totals = self._build_plan(
             amount, tolerance, horizon_filter
         )
         if not plan_rows:
@@ -1009,13 +1049,11 @@ class DistributionDialog(tk.Toplevel):
             self.summary_var.set("No plan available. Update your allocations and try again.")
             self.save_button.config(state="disabled")
             self.plan_rows = []
-            self.instrument_summaries = []
             self.risk_summary_lines = []
             self.risk_result = None
             return
 
         self.plan_rows = plan_rows
-        self.instrument_summaries = instrument_summaries
         self.amount = amount
         self.tolerance = tolerance
         self.totals = totals
@@ -1025,52 +1063,7 @@ class DistributionDialog(tk.Toplevel):
 
     def _populate_tree(self) -> None:
         self.tree.delete(*self.tree.get_children())
-        instrument_groups: dict[str, list[PlanRow]] = {}
         for row in self.plan_rows:
-            instrument_name = row.instrument.strip()
-            if instrument_name:
-                instrument_groups.setdefault(instrument_name, []).append(row)
-
-        for index, summary in enumerate(self.instrument_summaries):
-            parent_iid = f"instrument:{index}"
-            self.tree.insert(
-                "",
-                "end",
-                iid=parent_iid,
-                text=f"Instrument: {summary.name}",
-                values=(
-                    summary.currency,
-                    _format_percent(summary.target_share),
-                    _format_amount(summary.current_value),
-                    _format_percent(summary.current_share),
-                    _format_amount(summary.target_value),
-                    _format_amount(summary.recommended_change),
-                    _format_share_delta(summary.share_diff),
-                    summary.action,
-                ),
-                open=True,
-            )
-            for row in instrument_groups.get(summary.name, []):
-                self.tree.insert(
-                    parent_iid,
-                    "end",
-                    iid=str(row.allocation_id),
-                    text=row.path,
-                    values=(
-                        row.currency,
-                        _format_percent(row.target_share),
-                        _format_amount(row.current_value),
-                        _format_percent(row.current_share),
-                        _format_amount(row.target_value),
-                        _format_amount(row.recommended_change),
-                        _format_share_delta(row.share_diff),
-                        row.action,
-                    ),
-                )
-
-        for row in self.plan_rows:
-            if row.instrument.strip():
-                continue
             self.tree.insert(
                 "",
                 "end",
@@ -1107,10 +1100,9 @@ class DistributionDialog(tk.Toplevel):
     ) -> tuple[list[str], Optional[RiskOptimizationResult]]:
         bucket_shares: dict[str, float] = {}
         for row in plan_rows:
-            bucket = _map_horizon_to_risk_bucket(row.time_horizon)
-            if not bucket:
+            if not row.time_horizon:
                 continue
-            bucket_shares[bucket] = bucket_shares.get(bucket, 0.0) + row.target_share
+            bucket_shares[row.time_horizon] = bucket_shares.get(row.time_horizon, 0.0) + row.target_share
 
         if not bucket_shares:
             return [], None
@@ -1131,41 +1123,28 @@ class DistributionDialog(tk.Toplevel):
             bucket: share / normaliser * 100.0 for bucket, share in positive_shares.items()
         }
 
-        missing_parameters = [
-            bucket for bucket in bucket_weights if bucket not in RISK_BUCKET_PARAMETERS
-        ]
-        if missing_parameters:
-            missing_list = ", ".join(sorted(missing_parameters))
-            return (
-                [
-                    "Risk summary:",
-                    f"  Missing risk configuration for: {missing_list}.",
-                    "  Update the RISK_BUCKET_PARAMETERS table to include yields and durations.",
-                ],
-                None,
-            )
+        horizons = sorted(bucket_weights)
+        initial_inputs = {horizon: self._risk_inputs.get(horizon, {}) for horizon in horizons}
+        dialog = HorizonRiskDialog(self, horizons, initial_inputs)
+        if dialog.result is None:
+            return [], None
 
-        rates_yields: dict[str, Optional[float]] = {}
-        tips_yields: dict[str, Optional[float]] = {}
-        credit_yields: dict[str, Optional[float]] = {}
+        self._risk_inputs.update(dialog.result)
+
+        rates_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
+        tips_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
+        credit_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
         durations: dict[tuple[str, str], float] = {}
 
-        for bucket in bucket_weights:
-            params = RISK_BUCKET_PARAMETERS[bucket]
-            rates = params.get("rates")
-            tips = params.get("tips")
-            credit = params.get("credit")
-            rates_yields[bucket] = float(rates["yield"]) if rates and "yield" in rates else None
-            tips_yields[bucket] = float(tips["yield"]) if tips and "yield" in tips else None
-            credit_yields[bucket] = (
-                float(credit["yield"]) if credit and "yield" in credit else None
-            )
-            if rates and "duration" in rates:
-                durations[(bucket, "rates")] = float(rates["duration"])
-            if tips and "duration" in tips:
-                durations[(bucket, "tips")] = float(tips["duration"])
-            if credit and "duration" in credit:
-                durations[(bucket, "credit")] = float(credit["duration"])
+        for bucket, sleeve_data in dialog.result.items():
+            for sleeve, (yield_value, tenor_value) in sleeve_data.items():
+                if sleeve == "rates":
+                    rates_yields[bucket] = yield_value
+                elif sleeve == "tips":
+                    tips_yields[bucket] = yield_value
+                elif sleeve == "credit":
+                    credit_yields[bucket] = yield_value
+                durations[(bucket, sleeve)] = tenor_value
 
         spec = ProblemSpec(
             bucket_weights=bucket_weights,
@@ -1199,6 +1178,20 @@ class DistributionDialog(tk.Toplevel):
         for bucket in sorted(bucket_weights, key=lambda name: (-bucket_weights[name], name)):
             lines.append(f"    {bucket}: {bucket_weights[bucket]:.2f}%")
 
+        sleeve_labels = {
+            "rates": "Government (DV01)",
+            "tips": "Inflation (BE01)",
+            "credit": "Credit (CS01)",
+        }
+        lines.append("  Instruments used:")
+        for bucket in horizons:
+            selections = dialog.result.get(bucket, {})
+            for sleeve, (yield_value, tenor_value) in selections.items():
+                label = sleeve_labels.get(sleeve, sleeve.capitalize())
+                lines.append(
+                    f"    {bucket}: {label} | Yield {yield_value:.2f}% | Tenor {tenor_value:.2f}y"
+                )
+
         lines.append("  Sleeve allocation (share of investable portion):")
         for sleeve, total in sorted(optimisation.by_sleeve.items()):
             lines.append(f"    {sleeve.capitalize()}: {total * 100:.2f}%")
@@ -1207,7 +1200,7 @@ class DistributionDialog(tk.Toplevel):
 
     def _build_plan(
         self, amount: float, tolerance: float, time_horizon: Optional[str]
-    ) -> tuple[list[PlanRow], dict[str, float], list[InstrumentSummary]]:
+    ) -> tuple[list[PlanRow], dict[str, float]]:
         allocations = self.repo.get_all_allocations()
         nodes: dict[int, TreeNode] = {}
         roots: list[TreeNode] = []
@@ -1296,7 +1289,6 @@ class DistributionDialog(tk.Toplevel):
                     PlanRow(
                         allocation_id=allocation.id,
                         path=" > ".join(current_path),
-                        instrument=allocation.normalized_instrument,
                         currency=allocation.normalized_currency,
                         time_horizon=node_horizon,
                         target_share=cumulative_share,
@@ -1346,56 +1338,13 @@ class DistributionDialog(tk.Toplevel):
             else:
                 divest_total += row.recommended_change
 
-        instrument_groups: dict[str, list[PlanRow]] = {}
-        for row in plan_rows:
-            name = row.instrument.strip()
-            if name:
-                instrument_groups.setdefault(name, []).append(row)
-
-        instrument_summaries: list[InstrumentSummary] = []
-        for name, rows in instrument_groups.items():
-            target_share = sum(child.target_share for child in rows)
-            current_value = sum(child.current_value for child in rows)
-            current_share = sum(child.current_share for child in rows)
-            target_value = sum(child.target_value for child in rows)
-            recommended_change = sum(child.recommended_change for child in rows)
-            share_diff = sum(child.share_diff for child in rows)
-            currencies = {child.currency for child in rows if child.currency}
-            if not currencies:
-                currency = ""
-            elif len(currencies) == 1:
-                currency = next(iter(currencies))
-            else:
-                currency = "Mixed"
-            if abs(share_diff) < tolerance:
-                action = f"Within tolerance ({_format_share_delta(share_diff)})"
-            elif recommended_change >= 0:
-                action = f"Invest ({_format_share_delta(share_diff)})"
-            else:
-                action = f"Divest ({_format_share_delta(share_diff)})"
-            instrument_summaries.append(
-                InstrumentSummary(
-                    name=name,
-                    currency=currency,
-                    target_share=target_share,
-                    current_value=current_value,
-                    current_share=current_share,
-                    target_value=target_value,
-                    recommended_change=recommended_change,
-                    share_diff=share_diff,
-                    action=action,
-                )
-            )
-
-        instrument_summaries.sort(key=lambda summary: summary.name.lower())
-
         totals = {
             "current_total": total_current,
             "target_total": target_total,
             "invest_total": invest_total,
             "divest_total": divest_total,
         }
-        return plan_rows, totals, instrument_summaries
+        return plan_rows, totals
 
     # ------------------------------------------------------------------
     # Persistence
