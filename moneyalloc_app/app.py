@@ -15,7 +15,6 @@ from .models import Allocation, Distribution, DistributionEntry, canonicalize_ti
 from .sample_data import populate_with_sample_data
 from .risk_optimizer import (
     ProblemSpec,
-    RiskOptimizationResult,
     run_risk_equal_optimization,
 )
 
@@ -350,6 +349,16 @@ class PlanRow:
     recommended_change: float
     share_diff: float
     action: str
+
+
+@dataclass(slots=True)
+class CurrencyRiskResult:
+    """Represents the optimised allocation slice for a single currency."""
+
+    allocations: dict[tuple[str, str], float]
+    by_bucket: dict[str, float]
+    by_sleeve: dict[str, float]
+    currency_share: float
 
 
 def _format_amount(value: float) -> str:
@@ -1053,7 +1062,7 @@ class DistributionDialog(tk.Toplevel):
             tuple[str, str, str], tuple[Optional[float], Optional[float]]
         ] = {}
         self.risk_summary_lines: dict[str, list[str]] = {}
-        self.risk_results: dict[str, RiskOptimizationResult] = {}
+        self.risk_results: dict[str, CurrencyRiskResult] = {}
         self.currency_trees: dict[str, ttk.Treeview] = {}
         self.currency_frames: dict[str, ttk.Frame] = {}
 
@@ -1238,6 +1247,11 @@ class DistributionDialog(tk.Toplevel):
         else:
             lines.append("Currencies: All")
 
+        overall_risk_lines = self.risk_summary_lines.get("__overall__")
+        if overall_risk_lines:
+            lines.append("")
+            lines.extend(overall_risk_lines)
+
         for currency in sorted(self.currency_totals):
             totals = self.currency_totals[currency]
             lines.append("")
@@ -1393,17 +1407,17 @@ class DistributionDialog(tk.Toplevel):
             "credit": "Credit (CS01)",
         }
 
+        overall_invest_total = max(self.totals.get("invest_total", 0.0), 0.0)
+
         for currency in sorted(self.plan_rows_by_currency):
             tree = self._ensure_currency_tree(currency)
             rows = self.plan_rows_by_currency[currency]
-            totals = self.currency_totals.get(currency, {})
-            invest_total = max(totals.get("invest_total", 0.0), 0.0)
             risk_result = self.risk_results.get(currency)
-            if risk_result and invest_total > 0:
+            if risk_result and overall_invest_total > 0:
                 for bucket, bucket_share in sorted(
                     risk_result.by_bucket.items(), key=lambda item: item[0]
                 ):
-                    bucket_amount = invest_total * bucket_share
+                    bucket_amount = overall_invest_total * bucket_share
                     bucket_id = f"bucket::{bucket}"
                     tree.insert(
                         "",
@@ -1412,16 +1426,16 @@ class DistributionDialog(tk.Toplevel):
                         text=bucket,
                         values=(
                             _format_amount(bucket_amount),
-                            "",
+                            f"Share {bucket_share * 100:.2f}% of total",
                         ),
                     )
                     for sleeve in ("rates", "tips", "credit"):
                         allocation_share = risk_result.allocations.get((bucket, sleeve), 0.0)
                         if allocation_share <= 0:
                             continue
-                        amount_value = invest_total * allocation_share
+                        amount_value = overall_invest_total * allocation_share
                         selection = self._risk_selection_details.get((currency, bucket, sleeve))
-                        notes = []
+                        notes = [f"Share {allocation_share * 100:.2f}% of total"]
                         if selection:
                             yield_value, tenor_value = selection
                             if yield_value is not None:
@@ -1463,7 +1477,7 @@ class DistributionDialog(tk.Toplevel):
 
     def _build_risk_summary(
         self, plan_rows_by_currency: dict[str, list[PlanRow]]
-    ) -> tuple[dict[str, list[str]], dict[str, RiskOptimizationResult]]:
+    ) -> tuple[dict[str, list[str]], dict[str, CurrencyRiskResult]]:
         horizon_map: dict[str, list[str]] = {}
         for currency, rows in plan_rows_by_currency.items():
             horizons = sorted({row.time_horizon for row in rows if row.time_horizon})
@@ -1491,18 +1505,48 @@ class DistributionDialog(tk.Toplevel):
         for currency, result in input_results.items():
             self._risk_inputs[currency] = result
 
+        def make_bucket_key(currency: str, bucket: str) -> str:
+            prefix = currency or "__"
+            return f"{prefix}::{bucket}"
+
+        def parse_bucket_key(value: str) -> tuple[str, str]:
+            parts = value.split("::", 1)
+            if len(parts) == 2:
+                currency_part, bucket_part = parts
+            else:  # pragma: no cover - defensive
+                currency_part, bucket_part = "__", value
+            currency_value = "" if currency_part == "__" else currency_part
+            return currency_value, bucket_part
+
         self._risk_selection_details = {}
-        lines_map: dict[str, list[str]] = {}
-        results_map: dict[str, RiskOptimizationResult] = {}
+        inactive_currency_lines: dict[str, list[str]] = {}
+        combined_bucket_weights: dict[str, float] = {}
+        rates_yields: dict[str, Optional[float]] = {}
+        tips_yields: dict[str, Optional[float]] = {}
+        credit_yields: dict[str, Optional[float]] = {}
+        durations: dict[tuple[str, str], float] = {}
+        bucket_currency_map: dict[str, tuple[str, str]] = {}
+
+        currencies = sorted(horizon_map, key=lambda value: value or "")
+        currency_count = len(currencies)
+        if currency_count == 0:
+            return {}, {}
+        currency_equal_share = 1.0 / currency_count
+
         sleeve_labels = {
             "rates": "Government (DV01)",
             "tips": "Inflation (BE01)",
             "credit": "Credit (CS01)",
         }
 
-        for currency, rows in plan_rows_by_currency.items():
+        for currency in currencies:
+            rows = plan_rows_by_currency.get(currency, [])
             selections = input_results.get(currency)
             if not selections:
+                inactive_currency_lines[currency] = [
+                    f"Risk summary – {self._display_currency(currency)}:",
+                    "  Skipped: no risk inputs were provided.",
+                ]
                 continue
 
             bucket_totals: dict[str, float] = {}
@@ -1513,80 +1557,153 @@ class DistributionDialog(tk.Toplevel):
 
             total_share = sum(bucket_totals.values())
             if math.isclose(total_share, 0.0, abs_tol=1e-9):
-                continue
-
-            bucket_weights = {
-                bucket: share / total_share * 100.0
-                for bucket, share in bucket_totals.items()
-                if share > 0.0
-            }
-            if not bucket_weights:
-                continue
-
-            rates_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
-            tips_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
-            credit_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
-            durations: dict[tuple[str, str], float] = {}
-
-            for bucket, sleeve_data in selections.items():
-                if bucket not in bucket_weights:
-                    continue
-                bucket_duration = horizon_to_years(bucket)
-                for sleeve, (yield_value, _tenor_value) in sleeve_data.items():
-                    if sleeve == "rates":
-                        rates_yields[bucket] = yield_value
-                    elif sleeve == "tips":
-                        tips_yields[bucket] = yield_value
-                    elif sleeve == "credit":
-                        credit_yields[bucket] = yield_value
-                    durations[(bucket, sleeve)] = bucket_duration
-                    tenor = selections.get(bucket, {}).get(sleeve, (None, None))[1]
-                    self._risk_selection_details[(currency, bucket, sleeve)] = (yield_value, tenor)
-
-            spec = ProblemSpec(
-                bucket_weights=bucket_weights,
-                rates_yields=rates_yields,
-                tips_yields=tips_yields,
-                credit_yields=credit_yields,
-                durations=durations,
-            )
-
-            try:
-                optimisation = run_risk_equal_optimization(spec)
-            except (RuntimeError, ValueError) as exc:
-                lines_map[currency] = [
+                inactive_currency_lines[currency] = [
                     f"Risk summary – {self._display_currency(currency)}:",
-                    f"  {exc}",
+                    "  Skipped: no investable allocations with time horizons were found.",
                 ]
                 continue
 
-            results_map[currency] = optimisation
+            normalized_weights = {
+                bucket: share / total_share
+                for bucket, share in bucket_totals.items()
+                if share > 0.0
+            }
+            if not normalized_weights:
+                inactive_currency_lines[currency] = [
+                    f"Risk summary – {self._display_currency(currency)}:",
+                    "  Skipped: no positive allocation weights detected.",
+                ]
+                continue
+
+            for bucket, weight in normalized_weights.items():
+                combined_key = make_bucket_key(currency, bucket)
+                combined_bucket_weights[combined_key] = weight * currency_equal_share * 100.0
+                bucket_currency_map[combined_key] = (currency, bucket)
+
+            for bucket, sleeve_data in selections.items():
+                combined_key = make_bucket_key(currency, bucket)
+                if combined_key not in bucket_currency_map:
+                    continue
+                bucket_duration = horizon_to_years(bucket)
+                for sleeve, (yield_value, tenor_value) in sleeve_data.items():
+                    if yield_value is None:
+                        continue
+                    if sleeve == "rates":
+                        rates_yields[combined_key] = yield_value
+                    elif sleeve == "tips":
+                        tips_yields[combined_key] = yield_value
+                    elif sleeve == "credit":
+                        credit_yields[combined_key] = yield_value
+                    durations[(combined_key, sleeve)] = bucket_duration
+                    tenor = tenor_value if tenor_value is not None else bucket_duration
+                    self._risk_selection_details[(currency, bucket, sleeve)] = (yield_value, tenor)
+
+        if not combined_bucket_weights:
+            return inactive_currency_lines, {}
+
+        spec = ProblemSpec(
+            bucket_weights=combined_bucket_weights,
+            rates_yields=rates_yields,
+            tips_yields=tips_yields,
+            credit_yields=credit_yields,
+            durations=durations,
+        )
+
+        try:
+            optimisation = run_risk_equal_optimization(spec)
+        except (RuntimeError, ValueError) as exc:
+            overall_lines = [
+                "Risk summary – all currencies (equal currency allocation enforced):",
+                f"  {exc}",
+            ]
+            inactive_currency_lines["__overall__"] = overall_lines
+            return inactive_currency_lines, {}
+
+        results_map: dict[str, CurrencyRiskResult] = {}
+
+        def ensure_currency_entry(currency: str) -> CurrencyRiskResult:
+            entry = results_map.get(currency)
+            if entry is None:
+                entry = CurrencyRiskResult(
+                    allocations={},
+                    by_bucket={},
+                    by_sleeve={"rates": 0.0, "tips": 0.0, "credit": 0.0},
+                    currency_share=0.0,
+                )
+                results_map[currency] = entry
+            return entry
+
+        for bucket_id, share in optimisation.by_bucket.items():
+            currency, bucket = parse_bucket_key(bucket_id)
+            entry = ensure_currency_entry(currency)
+            entry.by_bucket[bucket] = share
+            entry.currency_share += share
+
+        for (bucket_id, sleeve), value in optimisation.allocations.items():
+            currency, bucket = parse_bucket_key(bucket_id)
+            entry = ensure_currency_entry(currency)
+            entry.allocations[(bucket, sleeve)] = value
+            entry.by_sleeve[sleeve] = entry.by_sleeve.get(sleeve, 0.0) + value
+
+        lines_map: dict[str, list[str]] = dict(inactive_currency_lines)
+
+        overall_lines = [
+            "Risk summary – all currencies (equal currency allocation enforced):",
+            f"  Portfolio carry: {optimisation.portfolio_yield * 100:.2f}%",
+            "  Equal per-bp risk:",
+            f"    Rates DV01: {optimisation.K_rates:.6f}",
+            f"    TIPS  DV01: {optimisation.K_tips:.6f}",
+            f"    Credit CS01: {optimisation.K_credit:.6f}",
+            "  Currency allocation targets:",
+        ]
+
+        for currency in currencies:
+            entry = results_map.get(currency)
+            share_percent = entry.currency_share * 100.0 if entry else currency_equal_share * 100.0
+            overall_lines.append(
+                f"    {self._display_currency(currency)}: {share_percent:.2f}%"
+            )
+
+        lines_map["__overall__"] = overall_lines
+
+        for currency in currencies:
+            entry = results_map.get(currency)
+            if not entry or math.isclose(entry.currency_share, 0.0, abs_tol=1e-9):
+                continue
+            selections = input_results.get(currency, {})
             lines = [
-                f"Risk summary – {self._display_currency(currency)} (equalised risk across sleeves):",
-                f"  Portfolio carry: {optimisation.portfolio_yield * 100:.2f}%",
-                "  Equal per-bp risk:",
-                f"    Rates DV01: {optimisation.K_rates:.6f}",
-                f"    TIPS  DV01: {optimisation.K_tips:.6f}",
-                f"    Credit CS01: {optimisation.K_credit:.6f}",
+                f"Risk summary – {self._display_currency(currency)}:",
+                f"  Target share: {entry.currency_share * 100:.2f}% of investable funds",
                 "  Bucket weights considered:",
             ]
-
-            for bucket in sorted(bucket_weights, key=lambda name: (-bucket_weights[name], name)):
-                lines.append(f"    {bucket}: {bucket_weights[bucket]:.2f}%")
+            for bucket in sorted(entry.by_bucket, key=lambda name: (-entry.by_bucket[name], name)):
+                total_pct = entry.by_bucket[bucket] * 100.0
+                if entry.currency_share > 0:
+                    currency_pct = (entry.by_bucket[bucket] / entry.currency_share) * 100.0
+                else:  # pragma: no cover - defensive
+                    currency_pct = 0.0
+                lines.append(
+                    f"    {bucket}: {currency_pct:.2f}% of currency ({total_pct:.2f}% of total)"
+                )
 
             lines.append("  Instruments used:")
             for bucket in sorted(selections):
-                if bucket not in bucket_weights:
+                if bucket not in entry.by_bucket:
                     continue
                 bucket_duration = horizon_to_years(bucket)
-                for sleeve, (yield_value, _tenor_value) in selections[bucket].items():
+                for sleeve, (yield_value, tenor_value) in selections[bucket].items():
+                    if yield_value is None:
+                        continue
+                    tenor_display = tenor_value if tenor_value is not None else bucket_duration
                     label = sleeve_labels.get(sleeve, sleeve.capitalize())
                     lines.append(
-                        f"    {bucket}: {label} | Yield {yield_value:.2f}% | Tenor {bucket_duration:.2f}y"
+                        f"    {bucket}: {label} | Yield {yield_value:.2f}% | Tenor {tenor_display:.2f}y"
                     )
 
-            lines.append("  Sleeve allocation (share of investable portion):")
-            for sleeve, total in sorted(optimisation.by_sleeve.items()):
+            lines.append("  Sleeve allocation (share of total investable funds):")
+            for sleeve, total in sorted(entry.by_sleeve.items()):
+                if total <= 0:
+                    continue
                 lines.append(f"    {sleeve.capitalize()}: {total * 100:.2f}%")
 
             lines_map[currency] = lines
