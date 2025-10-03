@@ -185,6 +185,150 @@ class HorizonRiskDialog(simpledialog.Dialog):
         pass
 
 
+
+
+
+class MultiCurrencyRiskDialog(simpledialog.Dialog):
+    """Dialog that captures risk inputs for multiple currencies."""
+
+    _SLEEVES = HorizonRiskDialog._SLEEVES
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        horizons_by_currency: dict[str, Iterable[str]],
+        initial: Optional[dict[str, dict[str, dict[str, tuple[float, float]]]]] = None,
+    ) -> None:
+        self.horizons_by_currency = {
+            currency: sorted(dict.fromkeys(horizons))
+            for currency, horizons in horizons_by_currency.items()
+        }
+        self.initial = initial or {}
+        self._vars: dict[tuple[str, str, str, str], tk.StringVar] = {}
+        self.result: Optional[dict[str, dict[str, dict[str, tuple[float, float]]]]] = None
+        super().__init__(parent, title="Configure risk inputs")
+
+    @staticmethod
+    def _display_currency(currency: str) -> str:
+        return currency or "Unspecified"
+
+    def body(self, master: tk.Widget) -> Optional[tk.Widget]:
+        notebook = ttk.Notebook(master)
+        notebook.pack(fill="both", expand=True)
+        focus_widget: Optional[tk.Widget] = None
+
+        for currency in sorted(self.horizons_by_currency, key=lambda value: value or ""):
+            frame = ttk.Frame(notebook)
+            frame.columnconfigure(tuple(range(1 + 2 * len(self._SLEEVES))), weight=1)
+            notebook.add(frame, text=self._display_currency(currency))
+
+            ttk.Label(frame, text="Time horizon").grid(row=0, column=0, padx=4, pady=4, sticky="w")
+            for col, (_sleeve, yield_label, tenor_label) in enumerate(self._SLEEVES, start=1):
+                ttk.Label(frame, text=yield_label).grid(row=0, column=2 * col - 1, padx=4, pady=4)
+                ttk.Label(frame, text=f"{tenor_label} (years)").grid(
+                    row=0, column=2 * col, padx=4, pady=4
+                )
+
+            for row_index, horizon in enumerate(self.horizons_by_currency[currency], start=1):
+                ttk.Label(frame, text=horizon).grid(row=row_index, column=0, sticky="w", padx=4, pady=2)
+                for col_index, (sleeve, _yield_label, _tenor_label) in enumerate(
+                    self._SLEEVES, start=1
+                ):
+                    yield_var = tk.StringVar()
+                    tenor_var = tk.StringVar()
+                    initial_sleeve = (
+                        self.initial.get(currency, {})
+                        .get(horizon, {})
+                        .get(sleeve)
+                    )
+                    tenor_entry_state: list[str] = []
+                    if initial_sleeve:
+                        yield_var.set(f"{initial_sleeve[0]:.4f}")
+                        tenor_var.set(f"{initial_sleeve[1]:.4f}")
+                    else:
+                        computed_tenor = horizon_to_years(horizon)
+                        tenor_var.set(f"{computed_tenor:.4f}")
+                        tenor_entry_state.append("readonly")
+                    yield_entry = ttk.Entry(frame, textvariable=yield_var, width=12)
+                    tenor_entry = ttk.Entry(frame, textvariable=tenor_var, width=10)
+                    yield_entry.grid(row=row_index, column=2 * col_index - 1, padx=4, pady=2)
+                    tenor_entry.grid(row=row_index, column=2 * col_index, padx=4, pady=2)
+                    if tenor_entry_state:
+                        tenor_entry.state(tenor_entry_state)
+                    self._vars[(currency, horizon, sleeve, "yield")] = yield_var
+                    self._vars[(currency, horizon, sleeve, "tenor")] = tenor_var
+                    if focus_widget is None:
+                        focus_widget = yield_entry
+
+        return focus_widget
+
+    def validate(self) -> bool:
+        data: dict[str, dict[str, dict[str, tuple[float, float]]]] = {}
+        for currency, horizons in self.horizons_by_currency.items():
+            currency_data: dict[str, dict[str, tuple[float, float]]] = {}
+            for horizon in horizons:
+                horizon_data: dict[str, tuple[float, float]] = {}
+                for sleeve, _yield_label, _tenor_label in self._SLEEVES:
+                    yield_value = self._vars[(currency, horizon, sleeve, "yield")].get().strip()
+                    tenor_value = self._vars[(currency, horizon, sleeve, "tenor")].get().strip()
+                    if not yield_value:
+                        continue
+                    try:
+                        yield_float = float(yield_value)
+                    except ValueError:
+                        messagebox.showerror(
+                            "Invalid risk input",
+                            "Yields must be numeric values.",
+                            parent=self,
+                        )
+                        return False
+                    if tenor_value:
+                        try:
+                            tenor_float = float(tenor_value)
+                        except ValueError:
+                            messagebox.showerror(
+                                "Invalid tenor",
+                                "Tenors must be numeric values when provided.",
+                                parent=self,
+                            )
+                            return False
+                    else:
+                        try:
+                            tenor_float = horizon_to_years(horizon)
+                        except ValueError as exc:
+                            messagebox.showerror("Invalid horizon", str(exc), parent=self)
+                            return False
+                    if tenor_float <= 0:
+                        messagebox.showerror(
+                            "Invalid tenor",
+                            "Tenor must be a positive value.",
+                            parent=self,
+                        )
+                        return False
+                    horizon_data[sleeve] = (yield_float, tenor_float)
+                if not horizon_data:
+                    messagebox.showerror(
+                        "Missing instruments",
+                        f"Provide at least one instrument for {self._display_currency(currency)} horizon {horizon}.",
+                        parent=self,
+                    )
+                    return False
+                currency_data[horizon] = horizon_data
+            if currency_data:
+                data[currency] = currency_data
+        if not data:
+            messagebox.showerror(
+                "Missing instruments",
+                "Provide at least one instrument to calculate risk metrics.",
+                parent=self,
+            )
+            return False
+        self.result = data
+        return True
+
+    def apply(self) -> None:
+        # Result already stored in validate.
+        pass
 @dataclass
 class TreeNode:
     allocation: Allocation
@@ -893,6 +1037,8 @@ class DistributionDialog(tk.Toplevel):
         self.repo = repo
         self.on_saved = on_saved
         self.plan_rows: list[PlanRow] = []
+        self.plan_rows_by_currency: dict[str, list[PlanRow]] = {}
+        self.currency_totals: dict[str, dict[str, float]] = {}
         self.amount: float = 0.0
         self.tolerance: float = 0.0
         self.totals: dict[str, float] = {
@@ -901,11 +1047,19 @@ class DistributionDialog(tk.Toplevel):
             "invest_total": 0.0,
             "divest_total": 0.0,
         }
-        self._risk_inputs: dict[str, dict[str, tuple[float, float]]] = {}
-        self._risk_selection_details: dict[tuple[str, str], tuple[Optional[float], Optional[float]]] = {}
+        self.selected_currencies: Optional[list[str]] = None
+        self._risk_inputs: dict[str, dict[str, dict[str, tuple[float, float]]]] = {}
+        self._risk_selection_details: dict[
+            tuple[str, str, str], tuple[Optional[float], Optional[float]]
+        ] = {}
+        self.risk_summary_lines: dict[str, list[str]] = {}
+        self.risk_results: dict[str, RiskOptimizationResult] = {}
+        self.currency_trees: dict[str, ttk.Treeview] = {}
+        self.currency_frames: dict[str, ttk.Frame] = {}
 
         self.amount_var = tk.StringVar(value="0")
         self.tolerance_var = tk.StringVar(value="2.0")
+        self.currency_filter_var = tk.StringVar()
         self.time_horizon_choices = self._build_time_horizon_choices()
         default_horizon = (
             self.time_horizon_choices[0]
@@ -915,8 +1069,6 @@ class DistributionDialog(tk.Toplevel):
         self.time_horizon_var = tk.StringVar(value=default_horizon)
         self.selected_time_horizon_label = default_horizon
         self.summary_var = tk.StringVar(value="Enter an amount and press Calculate.")
-        self.risk_summary_lines: list[str] = []
-        self.risk_result: Optional[RiskOptimizationResult] = None
 
         self.title("Distribute funds")
         self.transient(master)
@@ -944,7 +1096,16 @@ class DistributionDialog(tk.Toplevel):
             row=0, column=4, sticky="e"
         )
 
-        ttk.Label(form, text="Time horizon:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(form, text="Currencies (comma-separated):").grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        ttk.Entry(
+            form,
+            textvariable=self.currency_filter_var,
+            width=24,
+        ).grid(row=1, column=1, sticky="w", padx=(4, 12), pady=(6, 0))
+
+        ttk.Label(form, text="Time horizon:").grid(row=2, column=0, sticky="w", pady=(6, 0))
         self.horizon_filter_combo = ttk.Combobox(
             form,
             textvariable=self.time_horizon_var,
@@ -953,35 +1114,25 @@ class DistributionDialog(tk.Toplevel):
             width=18,
         )
         self.horizon_filter_combo.grid(
-            row=1, column=1, sticky="w", padx=(4, 12), pady=(6, 0)
+            row=2, column=1, sticky="w", padx=(4, 12), pady=(6, 0)
         )
 
         tree_frame = ttk.Frame(container)
         tree_frame.pack(fill="both", expand=True, pady=(10, 0))
-        columns = (
-            "amount",
-            "notes",
-        )
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show="tree headings", height=15)
-        self.tree.heading("#0", text="Allocation")
-        self.tree.column("#0", width=320, anchor="w")
-        self.tree.heading("amount", text="Amount")
-        self.tree.column("amount", width=140, anchor="e")
-        self.tree.heading("notes", text="Details")
-        self.tree.column("notes", width=260, anchor="w")
-
-        tree_scroll_y = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        tree_scroll_x = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=tree_scroll_y.set, xscrollcommand=tree_scroll_x.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        tree_scroll_y.grid(row=0, column=1, sticky="ns")
-        tree_scroll_x.grid(row=1, column=0, sticky="ew")
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
+        self.plan_notebook = ttk.Notebook(tree_frame)
+        self.plan_notebook.grid(row=0, column=0, sticky="nsew")
+        self._show_empty_state("Enter an amount and press Calculate.")
 
-        ttk.Label(container, textvariable=self.summary_var, anchor="w").pack(
-            fill="x", pady=(10, 0)
+        self.summary_label = ttk.Label(
+            container,
+            textvariable=self.summary_var,
+            anchor="w",
+            justify="left",
+            wraplength=720,
         )
+        self.summary_label.pack(fill="x", pady=(10, 0))
 
         button_row = ttk.Frame(container)
         button_row.pack(fill="x", pady=(10, 0))
@@ -996,6 +1147,120 @@ class DistributionDialog(tk.Toplevel):
 
         amount_entry.focus_set()
 
+    def _clear_plan_views(self) -> None:
+        for child in self.plan_notebook.winfo_children():
+            child.destroy()
+        self.currency_trees.clear()
+        self.currency_frames.clear()
+
+    def _show_empty_state(self, message: str) -> None:
+        self._clear_plan_views()
+        frame = ttk.Frame(self.plan_notebook, padding=20)
+        ttk.Label(
+            frame,
+            text=message,
+            justify="center",
+            wraplength=640,
+        ).pack(expand=True, fill="both")
+        self.plan_notebook.add(frame, text="Overview")
+        self.plan_notebook.select(frame)
+        self.summary_var.set(message)
+
+    def _ensure_currency_tree(self, currency: str) -> ttk.Treeview:
+        if currency in self.currency_trees:
+            tree = self.currency_trees[currency]
+            tree.delete(*tree.get_children())
+            return tree
+
+        frame = ttk.Frame(self.plan_notebook)
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        columns = ("amount", "notes")
+        tree = ttk.Treeview(frame, columns=columns, show="tree headings", height=15)
+        tree.heading("#0", text="Allocation")
+        tree.column("#0", width=320, anchor="w")
+        tree.heading("amount", text="Amount")
+        tree.column("amount", width=140, anchor="e")
+        tree.heading("notes", text="Details")
+        tree.column("notes", width=260, anchor="w")
+
+        tree_scroll_y = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree_scroll_x = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=tree_scroll_y.set, xscrollcommand=tree_scroll_x.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        tree_scroll_y.grid(row=0, column=1, sticky="ns")
+        tree_scroll_x.grid(row=1, column=0, sticky="ew")
+
+        display_label = self._display_currency(currency)
+        self.plan_notebook.add(frame, text=display_label)
+        self.currency_trees[currency] = tree
+        self.currency_frames[currency] = frame
+        return tree
+
+    @staticmethod
+    def _display_currency(currency: str) -> str:
+        return currency or "Unspecified"
+
+    def _parse_currency_filters(self) -> Optional[list[str]]:
+        raw = self.currency_filter_var.get()
+        if not raw:
+            return None
+        seen: dict[str, None] = {}
+        for part in raw.split(","):
+            text = part.strip()
+            if not text:
+                continue
+            upper = text.upper()
+            key = "" if upper in {"UNSPECIFIED", "NONE", "N/A", "NA"} else upper
+            seen.setdefault(key, None)
+        return list(seen.keys()) or None
+
+    def _update_summary(self) -> None:
+        if not self.plan_rows:
+            return
+
+        overall_invest = max(self.totals.get("invest_total", 0.0), 0.0)
+        overall_divest = abs(self.totals.get("divest_total", 0.0))
+        lines = [
+            f"Current total: {_format_amount(self.totals.get('current_total', 0.0))}",
+            f"Target total: {_format_amount(self.totals.get('target_total', 0.0))} (deposit {_format_amount(self.amount)})",
+            f"Invest: {_format_amount(overall_invest)} | Divest: {_format_amount(overall_divest)}",
+        ]
+
+        if self.selected_time_horizon_label:
+            lines.append(f"Time horizon: {self.selected_time_horizon_label}")
+
+        if self.selected_currencies:
+            display_names = ", ".join(
+                self._display_currency(value) for value in self.selected_currencies
+            )
+            lines.append(f"Currencies: {display_names}")
+        else:
+            lines.append("Currencies: All")
+
+        for currency in sorted(self.currency_totals):
+            totals = self.currency_totals[currency]
+            lines.append("")
+            lines.append(f"{self._display_currency(currency)}:")
+            lines.append(
+                "  Current "
+                + _format_amount(totals.get("current_total", 0.0))
+                + " → Target "
+                + _format_amount(totals.get("target_total", 0.0))
+            )
+            lines.append(
+                "  Invest "
+                + _format_amount(max(totals.get("invest_total", 0.0), 0.0))
+                + " | Divest "
+                + _format_amount(abs(totals.get("divest_total", 0.0)))
+            )
+            risk_lines = self.risk_summary_lines.get(currency, [])
+            if risk_lines:
+                lines.append("")
+                lines.extend(f"  {text}" for text in risk_lines)
+
+        self.summary_var.set("\n".join(lines))
+
     def _build_time_horizon_choices(self) -> list[str]:
         allocations = self.repo.get_all_allocations()
         unique_horizons = sorted(
@@ -1009,9 +1274,12 @@ class DistributionDialog(tk.Toplevel):
     # ------------------------------------------------------------------
     # Plan calculation
     # ------------------------------------------------------------------
+
     def _calculate_plan(self) -> None:
-        self.risk_summary_lines = []
-        self.risk_result = None
+        self.risk_summary_lines = {}
+        self.risk_results = {}
+        self._risk_selection_details = {}
+        self.plan_rows_by_currency = {}
         try:
             amount = float(self.amount_var.get())
         except ValueError:
@@ -1052,243 +1320,286 @@ class DistributionDialog(tk.Toplevel):
             display_label = canonical_label
             self.time_horizon_var.set(display_label)
         self.selected_time_horizon_label = display_label
-        plan_rows, totals = self._build_plan(
-            amount, tolerance, horizon_filter
+        currency_filters = self._parse_currency_filters()
+        self.selected_currencies = currency_filters[:] if currency_filters else None
+        plan_rows, totals, currency_totals = self._build_plan(
+            amount,
+            tolerance,
+            horizon_filter,
+            set(currency_filters) if currency_filters else None,
         )
         if not plan_rows:
-            if horizon_filter is None:
-                messagebox.showinfo(
-                    "No included allocations",
-                    "None of the allocations are marked as included in the roll-up, therefore no "
-                    "distribution recommendations can be produced.",
-                    parent=self,
+            if currency_filters and horizon_filter is not None:
+                title = "No matching allocations"
+                message = (
+                    "No allocations match the selected currencies and time horizon. "
+                    "Adjust the filters or update your allocation settings and try again."
+                )
+            elif currency_filters:
+                title = "No matching currencies"
+                message = (
+                    "No allocations match the selected currencies. Adjust the filter or "
+                    "update the allocation currencies and try again."
+                )
+            elif horizon_filter is not None:
+                title = "No matching allocations"
+                message = (
+                    "No allocations match the selected time horizon. Adjust the filter or "
+                    "update the allocation horizons and try again."
                 )
             else:
-                messagebox.showinfo(
-                    "No matching allocations",
-                    "No allocations match the selected time horizon. Adjust the filter or "
-                    "update the allocation horizons and try again.",
-                    parent=self,
+                title = "No included allocations"
+                message = (
+                    "None of the allocations are marked as included in the roll-up, therefore "
+                    "no distribution recommendations can be produced."
                 )
-            self.tree.delete(*self.tree.get_children())
-            self.summary_var.set("No plan available. Update your allocations and try again.")
-            self.save_button.config(state="disabled")
+            messagebox.showinfo(title, message, parent=self)
             self.plan_rows = []
-            self.risk_summary_lines = []
-            self.risk_result = None
+            self.currency_totals = {}
+            self.totals = {
+                "current_total": 0.0,
+                "target_total": 0.0,
+                "invest_total": 0.0,
+                "divest_total": 0.0,
+            }
+            self._show_empty_state("No plan available. Update your allocations and try again.")
+            self.save_button.config(state="disabled")
             return
 
         self.plan_rows = plan_rows
+        self.plan_rows_by_currency = {}
+        for row in plan_rows:
+            self.plan_rows_by_currency.setdefault(row.currency, []).append(row)
         self.amount = amount
         self.tolerance = tolerance
         self.totals = totals
-        self.risk_summary_lines, self.risk_result = self._build_risk_summary(plan_rows)
-        self._populate_tree()
+        self.currency_totals = currency_totals
+        risk_lines, risk_results = self._build_risk_summary(self.plan_rows_by_currency)
+        self.risk_summary_lines = risk_lines
+        self.risk_results = risk_results
+        self._populate_plan_views()
+        self._update_summary()
         self.save_button.config(state="normal")
 
-    def _populate_tree(self) -> None:
-        self.tree.delete(*self.tree.get_children())
-        invest_total = max(self.totals.get("invest_total", 0.0), 0.0)
-        divest_total = abs(self.totals.get("divest_total", 0.0))
+    def _populate_plan_views(self) -> None:
+        if not self.plan_rows_by_currency:
+            self._show_empty_state("No plan available. Update your allocations and try again.")
+            return
 
-        if self.risk_result and invest_total > 0:
-            sleeve_labels = {
-                "rates": "Government (DV01)",
-                "tips": "Inflation (BE01)",
-                "credit": "Credit (CS01)",
-            }
-            for bucket, bucket_share in sorted(
-                self.risk_result.by_bucket.items(), key=lambda item: item[0]
-            ):
-                bucket_amount = invest_total * bucket_share
-                bucket_id = f"bucket::{bucket}"
-                self.tree.insert(
-                    "",
-                    "end",
-                    iid=bucket_id,
-                    text=bucket,
-                    values=(
-                        _format_amount(bucket_amount),
-                        "",
-                    ),
-                )
-                for sleeve in ("rates", "tips", "credit"):
-                    allocation_share = self.risk_result.allocations.get((bucket, sleeve), 0.0)
-                    if allocation_share <= 0:
-                        continue
-                    amount_value = invest_total * allocation_share
-                    selection = self._risk_selection_details.get((bucket, sleeve))
-                    notes: list[str] = []
-                    if selection:
-                        yield_value, tenor_value = selection
-                        if yield_value is not None:
-                            notes.append(f"Yield {yield_value:.2f}%")
-                        if tenor_value is not None:
-                            notes.append(f"Tenor {tenor_value:.2f}y")
-                    notes_text = " | ".join(notes)
-                    self.tree.insert(
-                        bucket_id,
-                        "end",
-                        text=sleeve_labels.get(sleeve, sleeve.capitalize()),
-                        values=(
-                            _format_amount(amount_value),
-                            notes_text,
-                        ),
-                    )
-        else:
-            for row in self.plan_rows:
-                notes = f"Current {_format_amount(row.current_value)} → Target {_format_amount(row.target_value)}"
-                action = row.action.split("(")[0].strip()
-                if action:
-                    notes = f"{action}: {notes}"
-                self.tree.insert(
-                    "",
-                    "end",
-                    iid=str(row.allocation_id),
-                    text=row.path,
-                    values=(
-                        _format_amount(row.recommended_change),
-                        notes,
-                    ),
-                )
-
-        summary_lines = [
-            f"Current total: {_format_amount(self.totals.get('current_total', 0.0))}",
-            f"Target total: {_format_amount(self.totals.get('target_total', 0.0))} (deposit {_format_amount(self.amount)})",
-            f"Invest: {_format_amount(invest_total)} | Divest: {_format_amount(divest_total)}",
-        ]
-        if self.selected_time_horizon_label:
-            summary_lines.append(f"Time horizon: {self.selected_time_horizon_label}")
-
-        if self.risk_result and invest_total > 0:
-            summary_lines.append("")
-            summary_lines.append("Risk-based allocation amounts:")
-            for (bucket, sleeve), share in sorted(
-                self.risk_result.allocations.items(),
-                key=lambda item: (item[0][0], item[0][1]),
-            ):
-                if share <= 0:
-                    continue
-                amount_value = invest_total * share
-                label = f"  {bucket} – {sleeve.capitalize()}"
-                summary_lines.append(f"{label}: {_format_amount(amount_value)}")
-
-        if self.risk_summary_lines:
-            summary_lines.append("")
-            summary_lines.extend(self.risk_summary_lines)
-        self.summary_var.set("\n".join(summary_lines))
-
-    def _build_risk_summary(
-        self, plan_rows: list[PlanRow]
-    ) -> tuple[list[str], Optional[RiskOptimizationResult]]:
-        bucket_shares: dict[str, float] = {}
-        for row in plan_rows:
-            if not row.time_horizon:
-                continue
-            bucket_shares[row.time_horizon] = bucket_shares.get(row.time_horizon, 0.0) + row.target_share
-
-        if not bucket_shares:
-            return [], None
-
-        total_share = sum(bucket_shares.values())
-        if math.isclose(total_share, 0.0, abs_tol=1e-9):
-            return [], None
-
-        positive_shares = {bucket: share for bucket, share in bucket_shares.items() if share > 0.0}
-        if not positive_shares:
-            return [], None
-
-        normaliser = sum(positive_shares.values())
-        if math.isclose(normaliser, 0.0, abs_tol=1e-9):
-            return [], None
-
-        bucket_weights = {
-            bucket: share / normaliser * 100.0 for bucket, share in positive_shares.items()
-        }
-
-        horizons = sorted(bucket_weights)
-        initial_inputs = {horizon: self._risk_inputs.get(horizon, {}) for horizon in horizons}
-        dialog = HorizonRiskDialog(self, horizons, initial_inputs)
-        if dialog.result is None:
-            return [], None
-
-        self._risk_inputs.update(dialog.result)
-        self._risk_selection_details = {}
-
-        rates_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
-        tips_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
-        credit_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
-        durations: dict[tuple[str, str], float] = {}
-
-        for bucket, sleeve_data in dialog.result.items():
-            bucket_duration = horizon_to_years(bucket)
-            for sleeve, (yield_value, _tenor_value) in sleeve_data.items():
-                if sleeve == "rates":
-                    rates_yields[bucket] = yield_value
-                elif sleeve == "tips":
-                    tips_yields[bucket] = yield_value
-                elif sleeve == "credit":
-                    credit_yields[bucket] = yield_value
-                durations[(bucket, sleeve)] = bucket_duration
-                tenor = self._risk_inputs.get(bucket, {}).get(sleeve, (None, None))[1]
-                self._risk_selection_details[(bucket, sleeve)] = (yield_value, tenor)
-
-        spec = ProblemSpec(
-            bucket_weights=bucket_weights,
-            rates_yields=rates_yields,
-            tips_yields=tips_yields,
-            credit_yields=credit_yields,
-            durations=durations,
-        )
-
-        try:
-            optimisation = run_risk_equal_optimization(spec)
-        except (RuntimeError, ValueError) as exc:
-            return (
-                [
-                    "Risk summary:",
-                    f"  {exc}",
-                ],
-                None,
-            )
-
-        lines = [
-            "Risk summary (equalised risk across sleeves):",
-            f"  Portfolio carry: {optimisation.portfolio_yield * 100:.2f}%",
-            "  Equal per-bp risk:",
-            f"    Rates DV01: {optimisation.K_rates:.6f}",
-            f"    TIPS  DV01: {optimisation.K_tips:.6f}",
-            f"    Credit CS01: {optimisation.K_credit:.6f}",
-            "  Bucket weights considered:",
-        ]
-
-        for bucket in sorted(bucket_weights, key=lambda name: (-bucket_weights[name], name)):
-            lines.append(f"    {bucket}: {bucket_weights[bucket]:.2f}%")
-
+        self._clear_plan_views()
         sleeve_labels = {
             "rates": "Government (DV01)",
             "tips": "Inflation (BE01)",
             "credit": "Credit (CS01)",
         }
-        lines.append("  Instruments used:")
-        for bucket in horizons:
-            selections = dialog.result.get(bucket, {})
-            bucket_duration = horizon_to_years(bucket)
-            for sleeve, (yield_value, _tenor_value) in selections.items():
-                label = sleeve_labels.get(sleeve, sleeve.capitalize())
-                lines.append(
-                    f"    {bucket}: {label} | Yield {yield_value:.2f}% | Tenor {bucket_duration:.2f}y"
-                )
 
-        lines.append("  Sleeve allocation (share of investable portion):")
-        for sleeve, total in sorted(optimisation.by_sleeve.items()):
-            lines.append(f"    {sleeve.capitalize()}: {total * 100:.2f}%")
+        for currency in sorted(self.plan_rows_by_currency):
+            tree = self._ensure_currency_tree(currency)
+            rows = self.plan_rows_by_currency[currency]
+            totals = self.currency_totals.get(currency, {})
+            invest_total = max(totals.get("invest_total", 0.0), 0.0)
+            risk_result = self.risk_results.get(currency)
+            if risk_result and invest_total > 0:
+                for bucket, bucket_share in sorted(
+                    risk_result.by_bucket.items(), key=lambda item: item[0]
+                ):
+                    bucket_amount = invest_total * bucket_share
+                    bucket_id = f"bucket::{bucket}"
+                    tree.insert(
+                        "",
+                        "end",
+                        iid=bucket_id,
+                        text=bucket,
+                        values=(
+                            _format_amount(bucket_amount),
+                            "",
+                        ),
+                    )
+                    for sleeve in ("rates", "tips", "credit"):
+                        allocation_share = risk_result.allocations.get((bucket, sleeve), 0.0)
+                        if allocation_share <= 0:
+                            continue
+                        amount_value = invest_total * allocation_share
+                        selection = self._risk_selection_details.get((currency, bucket, sleeve))
+                        notes = []
+                        if selection:
+                            yield_value, tenor_value = selection
+                            if yield_value is not None:
+                                notes.append(f"Yield {yield_value:.2f}%")
+                            if tenor_value is not None:
+                                notes.append(f"Tenor {tenor_value:.2f}y")
+                        notes_text = " | ".join(notes)
+                        tree.insert(
+                            bucket_id,
+                            "end",
+                            text=sleeve_labels.get(sleeve, sleeve.capitalize()),
+                            values=(
+                                _format_amount(amount_value),
+                                notes_text,
+                            ),
+                        )
+            else:
+                for row in rows:
+                    notes = (
+                        f"Current {_format_amount(row.current_value)} → Target {_format_amount(row.target_value)}"
+                    )
+                    action = row.action.split("(")[0].strip()
+                    if action:
+                        notes = f"{action}: {notes}"
+                    tree.insert(
+                        "",
+                        "end",
+                        iid=str(row.allocation_id),
+                        text=row.path,
+                        values=(
+                            _format_amount(row.recommended_change),
+                            notes,
+                        ),
+                    )
 
-        return lines, optimisation
+        tabs = self.plan_notebook.tabs()
+        if tabs:
+            self.plan_notebook.select(tabs[0])
+
+    def _build_risk_summary(
+        self, plan_rows_by_currency: dict[str, list[PlanRow]]
+    ) -> tuple[dict[str, list[str]], dict[str, RiskOptimizationResult]]:
+        horizon_map: dict[str, list[str]] = {}
+        for currency, rows in plan_rows_by_currency.items():
+            horizons = sorted({row.time_horizon for row in rows if row.time_horizon})
+            if horizons:
+                horizon_map[currency] = horizons
+        if not horizon_map:
+            return {}, {}
+
+        if len(horizon_map) == 1:
+            currency, horizons = next(iter(horizon_map.items()))
+            initial_inputs = self._risk_inputs.get(currency, {})
+            dialog = HorizonRiskDialog(self, horizons, initial_inputs)
+            if dialog.result is None:
+                return {}, {}
+            input_results = {currency: dialog.result}
+        else:
+            initial_inputs = {
+                currency: self._risk_inputs.get(currency, {}) for currency in horizon_map
+            }
+            dialog = MultiCurrencyRiskDialog(self, horizon_map, initial_inputs)
+            if dialog.result is None:
+                return {}, {}
+            input_results = dialog.result
+
+        for currency, result in input_results.items():
+            self._risk_inputs[currency] = result
+
+        self._risk_selection_details = {}
+        lines_map: dict[str, list[str]] = {}
+        results_map: dict[str, RiskOptimizationResult] = {}
+        sleeve_labels = {
+            "rates": "Government (DV01)",
+            "tips": "Inflation (BE01)",
+            "credit": "Credit (CS01)",
+        }
+
+        for currency, rows in plan_rows_by_currency.items():
+            selections = input_results.get(currency)
+            if not selections:
+                continue
+
+            bucket_totals: dict[str, float] = {}
+            for row in rows:
+                if not row.time_horizon:
+                    continue
+                bucket_totals[row.time_horizon] = bucket_totals.get(row.time_horizon, 0.0) + row.target_share
+
+            total_share = sum(bucket_totals.values())
+            if math.isclose(total_share, 0.0, abs_tol=1e-9):
+                continue
+
+            bucket_weights = {
+                bucket: share / total_share * 100.0
+                for bucket, share in bucket_totals.items()
+                if share > 0.0
+            }
+            if not bucket_weights:
+                continue
+
+            rates_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
+            tips_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
+            credit_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
+            durations: dict[tuple[str, str], float] = {}
+
+            for bucket, sleeve_data in selections.items():
+                if bucket not in bucket_weights:
+                    continue
+                bucket_duration = horizon_to_years(bucket)
+                for sleeve, (yield_value, _tenor_value) in sleeve_data.items():
+                    if sleeve == "rates":
+                        rates_yields[bucket] = yield_value
+                    elif sleeve == "tips":
+                        tips_yields[bucket] = yield_value
+                    elif sleeve == "credit":
+                        credit_yields[bucket] = yield_value
+                    durations[(bucket, sleeve)] = bucket_duration
+                    tenor = selections.get(bucket, {}).get(sleeve, (None, None))[1]
+                    self._risk_selection_details[(currency, bucket, sleeve)] = (yield_value, tenor)
+
+            spec = ProblemSpec(
+                bucket_weights=bucket_weights,
+                rates_yields=rates_yields,
+                tips_yields=tips_yields,
+                credit_yields=credit_yields,
+                durations=durations,
+            )
+
+            try:
+                optimisation = run_risk_equal_optimization(spec)
+            except (RuntimeError, ValueError) as exc:
+                lines_map[currency] = [
+                    f"Risk summary – {self._display_currency(currency)}:",
+                    f"  {exc}",
+                ]
+                continue
+
+            results_map[currency] = optimisation
+            lines = [
+                f"Risk summary – {self._display_currency(currency)} (equalised risk across sleeves):",
+                f"  Portfolio carry: {optimisation.portfolio_yield * 100:.2f}%",
+                "  Equal per-bp risk:",
+                f"    Rates DV01: {optimisation.K_rates:.6f}",
+                f"    TIPS  DV01: {optimisation.K_tips:.6f}",
+                f"    Credit CS01: {optimisation.K_credit:.6f}",
+                "  Bucket weights considered:",
+            ]
+
+            for bucket in sorted(bucket_weights, key=lambda name: (-bucket_weights[name], name)):
+                lines.append(f"    {bucket}: {bucket_weights[bucket]:.2f}%")
+
+            lines.append("  Instruments used:")
+            for bucket in sorted(selections):
+                if bucket not in bucket_weights:
+                    continue
+                bucket_duration = horizon_to_years(bucket)
+                for sleeve, (yield_value, _tenor_value) in selections[bucket].items():
+                    label = sleeve_labels.get(sleeve, sleeve.capitalize())
+                    lines.append(
+                        f"    {bucket}: {label} | Yield {yield_value:.2f}% | Tenor {bucket_duration:.2f}y"
+                    )
+
+            lines.append("  Sleeve allocation (share of investable portion):")
+            for sleeve, total in sorted(optimisation.by_sleeve.items()):
+                lines.append(f"    {sleeve.capitalize()}: {total * 100:.2f}%")
+
+            lines_map[currency] = lines
+
+        return lines_map, results_map
 
     def _build_plan(
-        self, amount: float, tolerance: float, time_horizon: Optional[str]
-    ) -> tuple[list[PlanRow], dict[str, float]]:
+        self,
+        amount: float,
+        tolerance: float,
+        time_horizon: Optional[str],
+        currency_filter: Optional[set[str]],
+    ) -> tuple[list[PlanRow], dict[str, float], dict[str, dict[str, float]]]:
         allocations = self.repo.get_all_allocations()
         nodes: dict[int, TreeNode] = {}
         roots: list[TreeNode] = []
@@ -1297,12 +1608,16 @@ class DistributionDialog(tk.Toplevel):
                 continue
             nodes[allocation.id] = TreeNode(allocation=allocation, children=[])
         if not nodes:
-            return [], {
-                "current_total": 0.0,
-                "target_total": amount,
-                "invest_total": amount,
-                "divest_total": 0.0,
-            }, []
+            return (
+                [],
+                {
+                    "current_total": 0.0,
+                    "target_total": amount,
+                    "invest_total": amount,
+                    "divest_total": 0.0,
+                },
+                {},
+            )
 
         for allocation in allocations:
             if allocation.id is None:
@@ -1330,8 +1645,10 @@ class DistributionDialog(tk.Toplevel):
                 stripped = value.strip() if isinstance(value, str) else ""
                 return stripped if stripped else None
 
-        time_horizon = normalize_horizon(time_horizon)
+        def normalize_currency(value: Optional[str]) -> str:
+            return (value or "").strip().upper()
 
+        time_horizon = normalize_horizon(time_horizon)
         contribute_cache: dict[tuple[int, Optional[str]], bool] = {}
 
         def contributes(node: TreeNode, inherited: Optional[str]) -> bool:
@@ -1342,10 +1659,15 @@ class DistributionDialog(tk.Toplevel):
             node_horizon = normalize_horizon(node.allocation.time_horizon) or inherited
             child_contributions = [contributes(child, node_horizon) for child in node.children]
             has_contributing_child = any(child_contributions)
+            currency_key = normalize_currency(node.allocation.currency)
+            currency_allowed = (
+                currency_filter is None or currency_key in currency_filter
+            )
             matches_leaf = (
                 node.allocation.include_in_rollup
                 and not has_contributing_child
                 and (time_horizon is None or node_horizon == time_horizon)
+                and currency_allowed
             )
             result = matches_leaf or has_contributing_child
             contribute_cache[key] = result
@@ -1367,17 +1689,19 @@ class DistributionDialog(tk.Toplevel):
             current_path = path + [allocation.name]
             node_horizon = normalize_horizon(allocation.time_horizon) or inherited
             included_children = [child for child in node.children if contributes(child, node_horizon)]
+            currency_key = normalize_currency(allocation.currency)
             is_matching_leaf = (
                 allocation.include_in_rollup
                 and not included_children
                 and (time_horizon is None or node_horizon == time_horizon)
+                and (currency_filter is None or currency_key in currency_filter)
             )
             if is_matching_leaf:
                 plan_rows.append(
                     PlanRow(
                         allocation_id=allocation.id,
                         path=" > ".join(current_path),
-                        currency=allocation.normalized_currency,
+                        currency=currency_key,
                         time_horizon=node_horizon,
                         target_share=cumulative_share,
                         current_value=allocation.current_value,
@@ -1428,12 +1752,30 @@ class DistributionDialog(tk.Toplevel):
 
         totals = {
             "current_total": total_current,
-            "target_total": target_total,
+            "target_total": sum(row.target_value for row in plan_rows),
             "invest_total": invest_total,
             "divest_total": divest_total,
         }
-        return plan_rows, totals
 
+        currency_totals: dict[str, dict[str, float]] = {}
+        for row in plan_rows:
+            bucket = currency_totals.setdefault(
+                row.currency,
+                {
+                    "current_total": 0.0,
+                    "target_total": 0.0,
+                    "invest_total": 0.0,
+                    "divest_total": 0.0,
+                },
+            )
+            bucket["current_total"] += row.current_value
+            bucket["target_total"] += row.target_value
+            if row.recommended_change >= 0:
+                bucket["invest_total"] += row.recommended_change
+            else:
+                bucket["divest_total"] += row.recommended_change
+
+        return plan_rows, totals, currency_totals
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
