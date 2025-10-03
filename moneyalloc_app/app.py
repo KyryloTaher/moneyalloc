@@ -34,6 +34,33 @@ DEFAULT_TIME_HORIZONS: tuple[str, ...] = (
 ALL_TIME_HORIZONS_OPTION = "All time horizons"
 
 
+def horizon_to_years(horizon: str) -> float:
+    """Return the duration in years represented by a canonical horizon string."""
+
+    if not horizon:
+        raise ValueError("Horizon must be a non-empty string.")
+
+    value_part, unit = horizon[:-1], horizon[-1]
+    try:
+        value = float(value_part)
+    except ValueError as exc:  # pragma: no cover - defensive
+        raise ValueError(f"Invalid horizon value: {horizon!r}") from exc
+
+    if value <= 0:
+        raise ValueError(f"Horizon value must be positive: {horizon!r}")
+
+    if unit == "Y":
+        return value
+    if unit == "M":
+        return value / 12.0
+    if unit == "W":
+        return value / 52.0
+    if unit == "D":
+        return value / 365.0
+
+    raise ValueError(f"Unsupported horizon unit: {horizon!r}")
+
+
 class HorizonRiskDialog(simpledialog.Dialog):
     """Dialog that captures risk inputs for each time horizon."""
 
@@ -73,13 +100,20 @@ class HorizonRiskDialog(simpledialog.Dialog):
                 yield_var = tk.StringVar()
                 tenor_var = tk.StringVar()
                 initial_sleeve = self.initial.get(horizon, {}).get(sleeve)
+                tenor_entry_state: list[str] = []
                 if initial_sleeve:
                     yield_var.set(f"{initial_sleeve[0]:.4f}")
                     tenor_var.set(f"{initial_sleeve[1]:.4f}")
+                else:
+                    computed_tenor = horizon_to_years(horizon)
+                    tenor_var.set(f"{computed_tenor:.4f}")
+                    tenor_entry_state.append("readonly")
                 yield_entry = ttk.Entry(master, textvariable=yield_var, width=12)
                 tenor_entry = ttk.Entry(master, textvariable=tenor_var, width=10)
                 yield_entry.grid(row=row_index, column=2 * col_index - 1, padx=4, pady=2)
                 tenor_entry.grid(row=row_index, column=2 * col_index, padx=4, pady=2)
+                if tenor_entry_state:
+                    tenor_entry.state(tenor_entry_state)
                 self._vars[(horizon, sleeve, "yield")] = yield_var
                 self._vars[(horizon, sleeve, "tenor")] = tenor_var
                 if focus_widget is None:
@@ -93,25 +127,33 @@ class HorizonRiskDialog(simpledialog.Dialog):
             for sleeve, _yield_label, _tenor_label in self._SLEEVES:
                 yield_value = self._vars[(horizon, sleeve, "yield")].get().strip()
                 tenor_value = self._vars[(horizon, sleeve, "tenor")].get().strip()
-                if not yield_value and not tenor_value:
+                if not yield_value:
                     continue
-                if not yield_value or not tenor_value:
-                    messagebox.showerror(
-                        "Incomplete risk input",
-                        "Please provide both yield and tenor for the selected instrument.",
-                        parent=self,
-                    )
-                    return False
                 try:
                     yield_float = float(yield_value)
-                    tenor_float = float(tenor_value)
                 except ValueError:
                     messagebox.showerror(
                         "Invalid risk input",
-                        "Yields and tenors must be numeric values.",
+                        "Yields must be numeric values.",
                         parent=self,
                     )
                     return False
+                if tenor_value:
+                    try:
+                        tenor_float = float(tenor_value)
+                    except ValueError:
+                        messagebox.showerror(
+                            "Invalid tenor",
+                            "Tenors must be numeric values when provided.",
+                            parent=self,
+                        )
+                        return False
+                else:
+                    try:
+                        tenor_float = horizon_to_years(horizon)
+                    except ValueError as exc:  # pragma: no cover - defensive
+                        messagebox.showerror("Invalid horizon", str(exc), parent=self)
+                        return False
                 if tenor_float <= 0:
                     messagebox.showerror(
                         "Invalid tenor",
@@ -1137,14 +1179,15 @@ class DistributionDialog(tk.Toplevel):
         durations: dict[tuple[str, str], float] = {}
 
         for bucket, sleeve_data in dialog.result.items():
-            for sleeve, (yield_value, tenor_value) in sleeve_data.items():
+            bucket_duration = horizon_to_years(bucket)
+            for sleeve, (yield_value, _tenor_value) in sleeve_data.items():
                 if sleeve == "rates":
                     rates_yields[bucket] = yield_value
                 elif sleeve == "tips":
                     tips_yields[bucket] = yield_value
                 elif sleeve == "credit":
                     credit_yields[bucket] = yield_value
-                durations[(bucket, sleeve)] = tenor_value
+                durations[(bucket, sleeve)] = bucket_duration
 
         spec = ProblemSpec(
             bucket_weights=bucket_weights,
@@ -1186,10 +1229,11 @@ class DistributionDialog(tk.Toplevel):
         lines.append("  Instruments used:")
         for bucket in horizons:
             selections = dialog.result.get(bucket, {})
-            for sleeve, (yield_value, tenor_value) in selections.items():
+            bucket_duration = horizon_to_years(bucket)
+            for sleeve, (yield_value, _tenor_value) in selections.items():
                 label = sleeve_labels.get(sleeve, sleeve.capitalize())
                 lines.append(
-                    f"    {bucket}: {label} | Yield {yield_value:.2f}% | Tenor {tenor_value:.2f}y"
+                    f"    {bucket}: {label} | Yield {yield_value:.2f}% | Tenor {bucket_duration:.2f}y"
                 )
 
         lines.append("  Sleeve allocation (share of investable portion):")
