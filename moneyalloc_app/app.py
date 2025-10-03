@@ -902,6 +902,7 @@ class DistributionDialog(tk.Toplevel):
             "divest_total": 0.0,
         }
         self._risk_inputs: dict[str, dict[str, tuple[float, float]]] = {}
+        self._risk_selection_details: dict[tuple[str, str], tuple[Optional[float], Optional[float]]] = {}
 
         self.amount_var = tk.StringVar(value="0")
         self.tolerance_var = tk.StringVar(value="2.0")
@@ -958,34 +959,16 @@ class DistributionDialog(tk.Toplevel):
         tree_frame = ttk.Frame(container)
         tree_frame.pack(fill="both", expand=True, pady=(10, 0))
         columns = (
-            "currency",
-            "target_share",
-            "current_value",
-            "current_share",
-            "target_value",
-            "change",
-            "share_diff",
-            "action",
+            "amount",
+            "notes",
         )
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="tree headings", height=15)
         self.tree.heading("#0", text="Allocation")
         self.tree.column("#0", width=320, anchor="w")
-        self.tree.heading("currency", text="Currency")
-        self.tree.column("currency", width=80, anchor="center")
-        self.tree.heading("target_share", text="Target %")
-        self.tree.column("target_share", width=90, anchor="e")
-        self.tree.heading("current_value", text="Current value")
-        self.tree.column("current_value", width=110, anchor="e")
-        self.tree.heading("current_share", text="Current %")
-        self.tree.column("current_share", width=90, anchor="e")
-        self.tree.heading("target_value", text="Target value")
-        self.tree.column("target_value", width=110, anchor="e")
-        self.tree.heading("change", text="Change")
-        self.tree.column("change", width=110, anchor="e")
-        self.tree.heading("share_diff", text="Δ share")
-        self.tree.column("share_diff", width=90, anchor="e")
-        self.tree.heading("action", text="Action")
-        self.tree.column("action", width=200, anchor="w")
+        self.tree.heading("amount", text="Amount")
+        self.tree.column("amount", width=140, anchor="e")
+        self.tree.heading("notes", text="Details")
+        self.tree.column("notes", width=260, anchor="w")
 
         tree_scroll_y = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         tree_scroll_x = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
@@ -1105,26 +1088,70 @@ class DistributionDialog(tk.Toplevel):
 
     def _populate_tree(self) -> None:
         self.tree.delete(*self.tree.get_children())
-        for row in self.plan_rows:
-            self.tree.insert(
-                "",
-                "end",
-                iid=str(row.allocation_id),
-                text=row.path,
-                values=(
-                    row.currency,
-                    _format_percent(row.target_share),
-                    _format_amount(row.current_value),
-                    _format_percent(row.current_share),
-                    _format_amount(row.target_value),
-                    _format_amount(row.recommended_change),
-                    _format_share_delta(row.share_diff),
-                    row.action,
-                ),
-            )
-
-        invest_total = self.totals.get("invest_total", 0.0)
+        invest_total = max(self.totals.get("invest_total", 0.0), 0.0)
         divest_total = abs(self.totals.get("divest_total", 0.0))
+
+        if self.risk_result and invest_total > 0:
+            sleeve_labels = {
+                "rates": "Government (DV01)",
+                "tips": "Inflation (BE01)",
+                "credit": "Credit (CS01)",
+            }
+            for bucket, bucket_share in sorted(
+                self.risk_result.by_bucket.items(), key=lambda item: item[0]
+            ):
+                bucket_amount = invest_total * bucket_share
+                bucket_id = f"bucket::{bucket}"
+                self.tree.insert(
+                    "",
+                    "end",
+                    iid=bucket_id,
+                    text=bucket,
+                    values=(
+                        _format_amount(bucket_amount),
+                        "",
+                    ),
+                )
+                for sleeve in ("rates", "tips", "credit"):
+                    allocation_share = self.risk_result.allocations.get((bucket, sleeve), 0.0)
+                    if allocation_share <= 0:
+                        continue
+                    amount_value = invest_total * allocation_share
+                    selection = self._risk_selection_details.get((bucket, sleeve))
+                    notes: list[str] = []
+                    if selection:
+                        yield_value, tenor_value = selection
+                        if yield_value is not None:
+                            notes.append(f"Yield {yield_value:.2f}%")
+                        if tenor_value is not None:
+                            notes.append(f"Tenor {tenor_value:.2f}y")
+                    notes_text = " | ".join(notes)
+                    self.tree.insert(
+                        bucket_id,
+                        "end",
+                        text=sleeve_labels.get(sleeve, sleeve.capitalize()),
+                        values=(
+                            _format_amount(amount_value),
+                            notes_text,
+                        ),
+                    )
+        else:
+            for row in self.plan_rows:
+                notes = f"Current {_format_amount(row.current_value)} → Target {_format_amount(row.target_value)}"
+                action = row.action.split("(")[0].strip()
+                if action:
+                    notes = f"{action}: {notes}"
+                self.tree.insert(
+                    "",
+                    "end",
+                    iid=str(row.allocation_id),
+                    text=row.path,
+                    values=(
+                        _format_amount(row.recommended_change),
+                        notes,
+                    ),
+                )
+
         summary_lines = [
             f"Current total: {_format_amount(self.totals.get('current_total', 0.0))}",
             f"Target total: {_format_amount(self.totals.get('target_total', 0.0))} (deposit {_format_amount(self.amount)})",
@@ -1132,6 +1159,20 @@ class DistributionDialog(tk.Toplevel):
         ]
         if self.selected_time_horizon_label:
             summary_lines.append(f"Time horizon: {self.selected_time_horizon_label}")
+
+        if self.risk_result and invest_total > 0:
+            summary_lines.append("")
+            summary_lines.append("Risk-based allocation amounts:")
+            for (bucket, sleeve), share in sorted(
+                self.risk_result.allocations.items(),
+                key=lambda item: (item[0][0], item[0][1]),
+            ):
+                if share <= 0:
+                    continue
+                amount_value = invest_total * share
+                label = f"  {bucket} – {sleeve.capitalize()}"
+                summary_lines.append(f"{label}: {_format_amount(amount_value)}")
+
         if self.risk_summary_lines:
             summary_lines.append("")
             summary_lines.extend(self.risk_summary_lines)
@@ -1172,6 +1213,7 @@ class DistributionDialog(tk.Toplevel):
             return [], None
 
         self._risk_inputs.update(dialog.result)
+        self._risk_selection_details = {}
 
         rates_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
         tips_yields: dict[str, Optional[float]] = {bucket: None for bucket in bucket_weights}
@@ -1188,6 +1230,8 @@ class DistributionDialog(tk.Toplevel):
                 elif sleeve == "credit":
                     credit_yields[bucket] = yield_value
                 durations[(bucket, sleeve)] = bucket_duration
+                tenor = self._risk_inputs.get(bucket, {}).get(sleeve, (None, None))[1]
+                self._risk_selection_details[(bucket, sleeve)] = (yield_value, tenor)
 
         spec = ProblemSpec(
             bucket_weights=bucket_weights,
