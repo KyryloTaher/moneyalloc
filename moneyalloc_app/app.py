@@ -32,6 +32,13 @@ DEFAULT_TIME_HORIZONS: tuple[str, ...] = (
 )
 ALL_TIME_HORIZONS_OPTION = "All time horizons"
 
+_UNSPECIFIED_CURRENCY_ALIASES: frozenset[str] = frozenset({
+    "UNSPECIFIED",
+    "NONE",
+    "N/A",
+    "NA",
+})
+
 
 def horizon_to_years(horizon: str) -> float:
     """Return the duration in years represented by a canonical horizon string."""
@@ -340,7 +347,7 @@ class PlanRow:
 
     allocation_id: int
     path: str
-    currency: str
+    currencies: tuple[str, ...]
     time_horizon: Optional[str]
     target_share: float
     current_value: float
@@ -349,6 +356,12 @@ class PlanRow:
     recommended_change: float
     share_diff: float
     action: str
+
+    @property
+    def currency(self) -> str:
+        """Return the comma-separated currency label for persistence/display."""
+
+        return ", ".join(code for code in self.currencies if code)
 
 
 @dataclass(slots=True)
@@ -1220,9 +1233,29 @@ class DistributionDialog(tk.Toplevel):
             if not text:
                 continue
             upper = text.upper()
-            key = "" if upper in {"UNSPECIFIED", "NONE", "N/A", "NA"} else upper
+            key = "" if upper in _UNSPECIFIED_CURRENCY_ALIASES else upper
             seen.setdefault(key, None)
         return list(seen.keys()) or None
+
+    @staticmethod
+    def _parse_currency_codes(raw: Optional[str]) -> tuple[str, ...]:
+        text = (raw or "").strip()
+        if not text:
+            return ("",)
+
+        seen: dict[str, None] = {}
+        for part in text.split(","):
+            piece = part.strip()
+            if not piece:
+                continue
+            upper = piece.upper()
+            key = "" if upper in _UNSPECIFIED_CURRENCY_ALIASES else upper
+            seen.setdefault(key, None)
+
+        if not seen:
+            return ("",)
+
+        return tuple(seen.keys())
 
     def _update_summary(self) -> None:
         if not self.plan_rows:
@@ -1383,7 +1416,9 @@ class DistributionDialog(tk.Toplevel):
         self.plan_rows = plan_rows
         self.plan_rows_by_currency = {}
         for row in plan_rows:
-            self.plan_rows_by_currency.setdefault(row.currency, []).append(row)
+            codes = row.currencies if row.currencies else ("",)
+            for code in codes:
+                self.plan_rows_by_currency.setdefault(code, []).append(row)
         self.amount = amount
         self.tolerance = tolerance
         self.totals = totals
@@ -1762,11 +1797,15 @@ class DistributionDialog(tk.Toplevel):
                 stripped = value.strip() if isinstance(value, str) else ""
                 return stripped if stripped else None
 
-        def normalize_currency(value: Optional[str]) -> str:
-            return (value or "").strip().upper()
-
         time_horizon = normalize_horizon(time_horizon)
         contribute_cache: dict[tuple[int, Optional[str]], bool] = {}
+
+        def select_currency_codes(value: Optional[str]) -> tuple[str, ...]:
+            codes = self._parse_currency_codes(value)
+            if currency_filter is None:
+                return codes
+            filtered = tuple(code for code in codes if code in currency_filter)
+            return filtered
 
         def contributes(node: TreeNode, inherited: Optional[str]) -> bool:
             node_id = node.allocation.id if node.allocation.id is not None else id(node)
@@ -1776,10 +1815,8 @@ class DistributionDialog(tk.Toplevel):
             node_horizon = normalize_horizon(node.allocation.time_horizon) or inherited
             child_contributions = [contributes(child, node_horizon) for child in node.children]
             has_contributing_child = any(child_contributions)
-            currency_key = normalize_currency(node.allocation.currency)
-            currency_allowed = (
-                currency_filter is None or currency_key in currency_filter
-            )
+            currency_codes = select_currency_codes(node.allocation.currency)
+            currency_allowed = currency_filter is None or bool(currency_codes)
             matches_leaf = (
                 node.allocation.include_in_rollup
                 and not has_contributing_child
@@ -1806,19 +1843,19 @@ class DistributionDialog(tk.Toplevel):
             current_path = path + [allocation.name]
             node_horizon = normalize_horizon(allocation.time_horizon) or inherited
             included_children = [child for child in node.children if contributes(child, node_horizon)]
-            currency_key = normalize_currency(allocation.currency)
+            currency_codes = select_currency_codes(allocation.currency)
             is_matching_leaf = (
                 allocation.include_in_rollup
                 and not included_children
                 and (time_horizon is None or node_horizon == time_horizon)
-                and (currency_filter is None or currency_key in currency_filter)
+                and (currency_filter is None or bool(currency_codes))
             )
             if is_matching_leaf:
                 plan_rows.append(
                     PlanRow(
                         allocation_id=allocation.id,
                         path=" > ".join(current_path),
-                        currency=currency_key,
+                        currencies=currency_codes if currency_codes else ("",),
                         time_horizon=node_horizon,
                         target_share=cumulative_share,
                         current_value=allocation.current_value,
@@ -1876,21 +1913,24 @@ class DistributionDialog(tk.Toplevel):
 
         currency_totals: dict[str, dict[str, float]] = {}
         for row in plan_rows:
-            bucket = currency_totals.setdefault(
-                row.currency,
-                {
-                    "current_total": 0.0,
-                    "target_total": 0.0,
-                    "invest_total": 0.0,
-                    "divest_total": 0.0,
-                },
-            )
-            bucket["current_total"] += row.current_value
-            bucket["target_total"] += row.target_value
-            if row.recommended_change >= 0:
-                bucket["invest_total"] += row.recommended_change
-            else:
-                bucket["divest_total"] += row.recommended_change
+            codes = row.currencies if row.currencies else ("",)
+            weight = 1.0 / max(len(codes), 1)
+            for code in codes:
+                bucket = currency_totals.setdefault(
+                    code,
+                    {
+                        "current_total": 0.0,
+                        "target_total": 0.0,
+                        "invest_total": 0.0,
+                        "divest_total": 0.0,
+                    },
+                )
+                bucket["current_total"] += row.current_value * weight
+                bucket["target_total"] += row.target_value * weight
+                if row.recommended_change >= 0:
+                    bucket["invest_total"] += row.recommended_change * weight
+                else:
+                    bucket["divest_total"] += row.recommended_change * weight
 
         return plan_rows, totals, currency_totals
     # ------------------------------------------------------------------
