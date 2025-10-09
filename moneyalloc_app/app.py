@@ -1103,7 +1103,8 @@ class DistributionPanel(ttk.Frame):
         self.amount_entry.focus_set()
 
     def _clear_plan_views(self) -> None:
-        for child in self.plan_notebook.winfo_children():
+        self._remove_risk_tab()
+        for child in list(self.plan_notebook.winfo_children()):
             child.destroy()
         self.currency_trees.clear()
         self.currency_frames.clear()
@@ -1153,6 +1154,54 @@ class DistributionPanel(ttk.Frame):
         self.currency_trees[currency] = tree
         self.currency_frames[currency] = frame
         return tree
+
+    def _ensure_risk_tab(self) -> RiskInputEditor:
+        if self.risk_tab is None or not self.risk_tab.winfo_exists():
+            frame = ttk.Frame(self.plan_notebook, padding=10)
+            ttk.Label(
+                frame,
+                text=(
+                    "Provide yields and tenors for each required time horizon. "
+                    "Leave a field blank if that sleeve should be skipped for the selected bucket."
+                ),
+                justify="left",
+                wraplength=680,
+                anchor="w",
+            ).pack(fill="x")
+            editor = RiskInputEditor(frame)
+            editor.pack(fill="both", expand=True, pady=(8, 0))
+            self.risk_tab = frame
+            self.risk_editor = editor
+        elif self.risk_editor is None or not self.risk_editor.winfo_exists():
+            editor = RiskInputEditor(self.risk_tab)
+            editor.pack(fill="both", expand=True, pady=(8, 0))
+            self.risk_editor = editor
+        else:
+            editor = self.risk_editor
+
+        tab_id = str(self.risk_tab)
+        if tab_id not in self.plan_notebook.tabs():
+            self.plan_notebook.add(self.risk_tab, text="Risk inputs")
+        else:  # ensure tab label stays consistent
+            self.plan_notebook.tab(self.risk_tab, text="Risk inputs")
+
+        return editor
+
+    def _remove_risk_tab(self) -> None:
+        if self.risk_tab is None:
+            self.risk_editor = None
+            return
+
+        try:
+            self.plan_notebook.forget(self.risk_tab)
+        except tk.TclError:
+            pass
+
+        if self.risk_tab.winfo_exists():
+            self.risk_tab.destroy()
+
+        self.risk_tab = None
+        self.risk_editor = None
 
     @staticmethod
     def _display_currency(currency: str) -> str:
