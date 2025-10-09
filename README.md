@@ -47,15 +47,15 @@ On first launch an empty database is created next to the Python modules. Use **F
 - Update the **Current value** field whenever the value of an allocation changes (for example after a price movement).
 - Use the **Instrument** field on leaf allocations to label positions that should be aggregated when rebalancing.
 - Assign a **Time horizon** to parents or leaves using the `number + unit` format (for example `1Y`, `3M`, `6W` or `10D`). Empty children inherit the value from the closest ancestor, which can later be used to scope distributions.
-- The **Tools** menu hosts the distribution calculator and the distribution history browser.
+- Switch between the **Distribute funds** and **Distribution history** tabs in the main window to work with recommendations and review previous plans.
 
 The *Children share* label helps you verify that the percentages of the immediate children sum up correctly for the selected parent.
 
 ## Distributing money
 
-Use **Tools → Distribute funds…** to enter the amount you would like to allocate and the maximum deviation (in percentage points) you are willing to tolerate. Optionally select a time horizon to recalculate the target percentages using only leaves that match that classification. The dialog calculates the target value for every included allocation, highlights which buckets need investment or divestment and allows you to save the plan to the database.
+Use the **Distribute funds** tab in the main window to enter the amount you would like to allocate and the maximum deviation (in percentage points) you are willing to tolerate. Optionally select a time horizon to recalculate the target percentages using only leaves that match that classification. The planner calculates the target value for every included allocation, highlights which buckets need investment or divestment, and allows you to save the plan to the database. When a calculation requires market assumptions the tab reveals the **Risk inputs** editor so you can supply the necessary yields and tenors without leaving the main window.
 
-Saved plans can be reviewed or deleted via **Tools → Distribution history…**. The history view shows the recorded totals, the tolerance that was used and the recommended actions for each allocation.
+Saved plans can be reviewed or deleted from the **Distribution history** tab. The history view shows the recorded totals, the tolerance that was used and the recommended actions for each allocation.
 
 ## CSV import/export format
 
