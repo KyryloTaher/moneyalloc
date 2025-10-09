@@ -338,11 +338,6 @@ class AllocationApp(ttk.Frame):
         file_menu.add_command(label="Exit", command=self.master.destroy)
         menubar.add_cascade(label="File", menu=file_menu)
 
-        tools_menu = tk.Menu(menubar, tearoff=False)
-        tools_menu.add_command(label="Distribute funds…", command=self._open_distribution_dialog)
-        tools_menu.add_command(label="Distribution history…", command=self._open_distribution_history)
-        menubar.add_cascade(label="Tools", menu=tools_menu)
-
         self.master.config(menu=menubar)
 
     def _create_widgets(self) -> None:
@@ -785,14 +780,6 @@ class AllocationApp(ttk.Frame):
     # ------------------------------------------------------------------
     # Distribution helpers
     # ------------------------------------------------------------------
-    def _open_distribution_dialog(self) -> None:
-        self.main_notebook.select(self.distribution_tab)
-        self.distribution_panel.focus_amount_entry()
-
-    def _open_distribution_history(self) -> None:
-        self.main_notebook.select(self.history_tab)
-        self.history_panel.refresh()
-
     def _on_distribution_saved(self, name: str, count: int) -> None:
         self.status_var.set(
             f"Saved distribution '{name}' with {count} recommendation{'s' if count != 1 else ''}."
@@ -999,7 +986,6 @@ class DistributionPanel(ttk.Frame):
         self.risk_results: dict[str, CurrencyRiskResult] = {}
         self.currency_trees: dict[str, ttk.Treeview] = {}
         self.currency_frames: dict[str, ttk.Frame] = {}
-        self.risk_tab: Optional[ttk.Frame] = None
 
         self.amount_var = tk.StringVar(value="0")
         self.tolerance_var = tk.StringVar(value="2.0")
@@ -1068,8 +1054,7 @@ class DistributionPanel(ttk.Frame):
 
         self.plan_notebook = ttk.Notebook(tree_frame)
         self.plan_notebook.grid(row=0, column=0, sticky="nsew")
-        self._risk_editor_container = container
-        self.risk_editor = RiskInputEditor(self._risk_editor_container)
+        self.risk_editor = RiskInputEditor(container)
         self.risk_editor.hide()
         self._show_empty_state("Enter an amount and press Calculate.")
 
@@ -1102,16 +1087,14 @@ class DistributionPanel(ttk.Frame):
         self.amount_entry.focus_set()
 
     def _clear_plan_views(self) -> None:
-        self._remove_risk_tab()
         for child in list(self.plan_notebook.winfo_children()):
             child.destroy()
         self.currency_trees.clear()
         self.currency_frames.clear()
+        self.risk_editor.clear()
 
     def _show_empty_state(self, message: str) -> None:
         self._clear_plan_views()
-        if self.risk_editor is None:
-            self.risk_editor = RiskInputEditor(self._risk_editor_container)
         self.risk_editor.clear()
         self.risk_editor.hide()
         frame = ttk.Frame(self.plan_notebook, padding=20)
@@ -1155,53 +1138,6 @@ class DistributionPanel(ttk.Frame):
         self.currency_trees[currency] = tree
         self.currency_frames[currency] = frame
         return tree
-
-    def _ensure_risk_tab(self) -> RiskInputEditor:
-        if self.risk_tab is None or not self.risk_tab.winfo_exists():
-            frame = ttk.Frame(self.plan_notebook, padding=10)
-            ttk.Label(
-                frame,
-                text=(
-                    "Provide yields and tenors for each required time horizon. "
-                    "Leave a field blank if that sleeve should be skipped for the selected bucket."
-                ),
-                justify="left",
-                wraplength=680,
-                anchor="w",
-            ).pack(fill="x")
-            editor = RiskInputEditor(frame)
-            editor.pack(fill="both", expand=True, pady=(8, 0))
-            self.risk_tab = frame
-            self.risk_editor = editor
-        elif self.risk_editor is None or not self.risk_editor.winfo_exists():
-            editor = RiskInputEditor(self.risk_tab)
-            editor.pack(fill="both", expand=True, pady=(8, 0))
-            self.risk_editor = editor
-        else:
-            editor = self.risk_editor
-
-        tab_id = str(self.risk_tab)
-        if tab_id not in self.plan_notebook.tabs():
-            self.plan_notebook.add(self.risk_tab, text="Risk inputs")
-        else:  # ensure tab label stays consistent
-            self.plan_notebook.tab(self.risk_tab, text="Risk inputs")
-
-        return editor
-
-    def _remove_risk_tab(self) -> None:
-        if self.risk_tab is None:
-            return
-
-        try:
-            self.plan_notebook.forget(self.risk_tab)
-        except tk.TclError:
-            pass
-
-        if self.risk_tab.winfo_exists():
-            self.risk_tab.destroy()
-
-        self.risk_tab = None
-        self.risk_editor = None
 
     @staticmethod
     def _display_currency(currency: str) -> str:
