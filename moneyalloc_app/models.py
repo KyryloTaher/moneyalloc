@@ -142,10 +142,24 @@ class DistributionEntry:
     action: str
 
 
+@dataclass(slots=True)
+class DistributionRiskInput:
+    """Stores risk input values captured alongside a distribution."""
+
+    id: Optional[int]
+    distribution_id: int
+    currency: str
+    time_horizon: str
+    sleeve: str
+    yield_value: Optional[float]
+    tenor_value: Optional[float]
+
+
 __all__ = [
     "Allocation",
     "Distribution",
     "DistributionEntry",
+    "DistributionRiskInput",
     "canonicalize_time_horizon",
     "display_time_horizon",
 ]

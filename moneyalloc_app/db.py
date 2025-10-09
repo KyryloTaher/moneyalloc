@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 import sqlite3
 
-from .models import Allocation, Distribution, DistributionEntry
+from .models import Allocation, Distribution, DistributionEntry, DistributionRiskInput
 
 DB_FILENAME = "allocations.db"
 
@@ -90,6 +90,19 @@ class AllocationRepository:
                     recommended_change REAL NOT NULL,
                     share_diff REAL NOT NULL,
                     action TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS distribution_risk_inputs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    distribution_id INTEGER NOT NULL REFERENCES distributions(id) ON DELETE CASCADE,
+                    currency TEXT,
+                    time_horizon TEXT NOT NULL,
+                    sleeve TEXT NOT NULL,
+                    yield_value REAL,
+                    tenor_value REAL
                 )
                 """
             )
@@ -269,7 +282,10 @@ class AllocationRepository:
     # Distribution helpers
     # ------------------------------------------------------------------
     def create_distribution(
-        self, distribution: Distribution, entries: Iterable[DistributionEntry]
+        self,
+        distribution: Distribution,
+        entries: Iterable[DistributionEntry],
+        risk_inputs: Iterable[DistributionRiskInput] | None = None,
     ) -> int:
         with self._connect() as conn:
             cursor = conn.execute(
@@ -319,6 +335,32 @@ class AllocationRepository:
                     for entry in entries
                 ],
             )
+            records = list(risk_inputs or [])
+            if records:
+                conn.executemany(
+                    """
+                    INSERT INTO distribution_risk_inputs (
+                        distribution_id,
+                        currency,
+                        time_horizon,
+                        sleeve,
+                        yield_value,
+                        tenor_value
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            distribution_id,
+                            record.currency,
+                            record.time_horizon,
+                            record.sleeve,
+                            record.yield_value,
+                            record.tenor_value,
+                        )
+                        for record in records
+                    ],
+                )
             conn.commit()
         return distribution_id
 
@@ -340,6 +382,18 @@ class AllocationRepository:
                 (distribution_id,),
             ).fetchall()
         return [self._row_to_distribution_entry(row) for row in rows]
+
+    def get_distribution_risk_inputs(self, distribution_id: int) -> List[DistributionRiskInput]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM distribution_risk_inputs
+                WHERE distribution_id = ?
+                ORDER BY currency, time_horizon, sleeve, id
+                """,
+                (distribution_id,),
+            ).fetchall()
+        return [self._row_to_distribution_risk_input(row) for row in rows]
 
     def delete_distribution(self, distribution_id: int) -> None:
         with self._connect() as conn:
@@ -371,6 +425,18 @@ class AllocationRepository:
             recommended_change=float(row["recommended_change"] or 0.0),
             share_diff=float(row["share_diff"] or 0.0),
             action=row["action"],
+        )
+
+    @staticmethod
+    def _row_to_distribution_risk_input(row: sqlite3.Row) -> DistributionRiskInput:
+        return DistributionRiskInput(
+            id=int(row["id"]),
+            distribution_id=int(row["distribution_id"]),
+            currency=row["currency"] or "",
+            time_horizon=row["time_horizon"],
+            sleeve=row["sleeve"],
+            yield_value=row["yield_value"],
+            tenor_value=row["tenor_value"],
         )
 
 
