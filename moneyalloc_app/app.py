@@ -7,11 +7,17 @@ import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Dict, Iterable, List, Optional
 
 from .db import AllocationRepository
-from .models import Allocation, Distribution, DistributionEntry, canonicalize_time_horizon
+from .models import (
+    Allocation,
+    Distribution,
+    DistributionEntry,
+    DistributionRiskInput,
+    canonicalize_time_horizon,
+)
 from .sample_data import populate_with_sample_data
 from .risk_optimizer import (
     ProblemSpec,
@@ -67,8 +73,8 @@ def horizon_to_years(horizon: str) -> float:
     raise ValueError(f"Unsupported horizon unit: {horizon!r}")
 
 
-class HorizonRiskDialog(simpledialog.Dialog):
-    """Dialog that captures risk inputs for each time horizon."""
+class RiskInputEditor(ttk.LabelFrame):
+    """Inline editor that captures risk inputs for required time horizons."""
 
     _SLEEVES: tuple[tuple[str, str, str], ...] = (
         ("rates", "Government (DV01) yield", "Government tenor"),
@@ -76,157 +82,63 @@ class HorizonRiskDialog(simpledialog.Dialog):
         ("credit", "Credit (CS01) yield", "Credit tenor"),
     )
 
-    def __init__(
-        self,
-        parent: tk.Misc,
-        horizons: Iterable[str],
-        initial: Optional[dict[str, dict[str, tuple[float, float]]]] = None,
-    ) -> None:
-        self.horizons = list(dict.fromkeys(horizons))
-        self.horizons.sort()
-        self.initial = initial or {}
-        self._vars: dict[tuple[str, str, str], tk.StringVar] = {}
-        self.result: Optional[dict[str, dict[str, tuple[float, float]]]] = None
-        super().__init__(parent, title="Configure risk inputs")
-
-    def body(self, master: tk.Widget) -> Optional[tk.Widget]:
-        ttk.Label(master, text="Time horizon").grid(row=0, column=0, padx=4, pady=4)
-        for col, (_sleeve, yield_label, tenor_label) in enumerate(self._SLEEVES, start=1):
-            ttk.Label(master, text=yield_label).grid(row=0, column=2 * col - 1, padx=4, pady=4)
-            ttk.Label(master, text=f"{tenor_label} (years)").grid(
-                row=0, column=2 * col, padx=4, pady=4
-            )
-
-        focus_widget: Optional[tk.Widget] = None
-        for row_index, horizon in enumerate(self.horizons, start=1):
-            ttk.Label(master, text=horizon).grid(row=row_index, column=0, sticky="w", padx=4, pady=2)
-            for col_index, (sleeve, _yield_label, _tenor_label) in enumerate(
-                self._SLEEVES, start=1
-            ):
-                yield_var = tk.StringVar()
-                tenor_var = tk.StringVar()
-                initial_sleeve = self.initial.get(horizon, {}).get(sleeve)
-                tenor_entry_state: list[str] = []
-                if initial_sleeve:
-                    yield_var.set(f"{initial_sleeve[0]:.4f}")
-                    tenor_var.set(f"{initial_sleeve[1]:.4f}")
-                else:
-                    computed_tenor = horizon_to_years(horizon)
-                    tenor_var.set(f"{computed_tenor:.4f}")
-                    tenor_entry_state.append("readonly")
-                yield_entry = ttk.Entry(master, textvariable=yield_var, width=12)
-                tenor_entry = ttk.Entry(master, textvariable=tenor_var, width=10)
-                yield_entry.grid(row=row_index, column=2 * col_index - 1, padx=4, pady=2)
-                tenor_entry.grid(row=row_index, column=2 * col_index, padx=4, pady=2)
-                if tenor_entry_state:
-                    tenor_entry.state(tenor_entry_state)
-                self._vars[(horizon, sleeve, "yield")] = yield_var
-                self._vars[(horizon, sleeve, "tenor")] = tenor_var
-                if focus_widget is None:
-                    focus_widget = yield_entry
-        return focus_widget
-
-    def validate(self) -> bool:
-        data: dict[str, dict[str, tuple[float, float]]] = {}
-        for horizon in self.horizons:
-            horizon_data: dict[str, tuple[float, float]] = {}
-            for sleeve, _yield_label, _tenor_label in self._SLEEVES:
-                yield_value = self._vars[(horizon, sleeve, "yield")].get().strip()
-                tenor_value = self._vars[(horizon, sleeve, "tenor")].get().strip()
-                if not yield_value:
-                    continue
-                try:
-                    yield_float = float(yield_value)
-                except ValueError:
-                    messagebox.showerror(
-                        "Invalid risk input",
-                        "Yields must be numeric values.",
-                        parent=self,
-                    )
-                    return False
-                if tenor_value:
-                    try:
-                        tenor_float = float(tenor_value)
-                    except ValueError:
-                        messagebox.showerror(
-                            "Invalid tenor",
-                            "Tenors must be numeric values when provided.",
-                            parent=self,
-                        )
-                        return False
-                else:
-                    try:
-                        tenor_float = horizon_to_years(horizon)
-                    except ValueError as exc:  # pragma: no cover - defensive
-                        messagebox.showerror("Invalid horizon", str(exc), parent=self)
-                        return False
-                if tenor_float <= 0:
-                    messagebox.showerror(
-                        "Invalid tenor",
-                        "Tenor must be a positive value.",
-                        parent=self,
-                    )
-                    return False
-                horizon_data[sleeve] = (yield_float, tenor_float)
-            if not horizon_data:
-                messagebox.showerror(
-                    "Missing instruments",
-                    f"Provide at least one instrument for time horizon {horizon}.",
-                    parent=self,
-                )
-                return False
-            data[horizon] = horizon_data
-        if not data:
-            messagebox.showerror(
-                "Missing instruments",
-                "Provide at least one instrument to calculate risk metrics.",
-                parent=self,
-            )
-            return False
-        self.result = data
-        return True
-
-    def apply(self) -> None:
-        # Result already stored in validate.
-        pass
-
-
-
-
-
-class MultiCurrencyRiskDialog(simpledialog.Dialog):
-    """Dialog that captures risk inputs for multiple currencies."""
-
-    _SLEEVES = HorizonRiskDialog._SLEEVES
-
-    def __init__(
-        self,
-        parent: tk.Misc,
-        horizons_by_currency: dict[str, Iterable[str]],
-        initial: Optional[dict[str, dict[str, dict[str, tuple[float, float]]]]] = None,
-    ) -> None:
-        self.horizons_by_currency = {
-            currency: sorted(dict.fromkeys(horizons))
-            for currency, horizons in horizons_by_currency.items()
-        }
-        self.initial = initial or {}
+    def __init__(self, master: tk.Widget) -> None:
+        super().__init__(master, text="Risk inputs", padding=10)
+        self._notebook = ttk.Notebook(self)
+        self._notebook.pack(fill="both", expand=True)
         self._vars: dict[tuple[str, str, str, str], tk.StringVar] = {}
-        self.result: Optional[dict[str, dict[str, dict[str, tuple[float, float]]]]] = None
-        super().__init__(parent, title="Configure risk inputs")
+        self._status_var = tk.StringVar()
+        self._status_label = ttk.Label(
+            self,
+            textvariable=self._status_var,
+            wraplength=720,
+            foreground="#aa0000",
+            justify="left",
+        )
+        self._status_label.pack(fill="x", pady=(8, 0))
+        self._horizons: dict[str, list[str]] = {}
+        self._visible = False
+
+    def hide(self) -> None:
+        if self._visible:
+            self.pack_forget()
+            self._visible = False
+
+    def show(self) -> None:
+        if not self._visible:
+            self.pack(fill="x", pady=(10, 0))
+            self._visible = True
+
+    def clear(self) -> None:
+        for child in self._notebook.winfo_children():
+            child.destroy()
+        self._vars.clear()
+        self._horizons = {}
+        self._status_var.set("")
 
     @staticmethod
     def _display_currency(currency: str) -> str:
         return currency or "Unspecified"
 
-    def body(self, master: tk.Widget) -> Optional[tk.Widget]:
-        notebook = ttk.Notebook(master)
-        notebook.pack(fill="both", expand=True)
-        focus_widget: Optional[tk.Widget] = None
-
-        for currency in sorted(self.horizons_by_currency, key=lambda value: value or ""):
-            frame = ttk.Frame(notebook)
+    def set_requirements(
+        self,
+        horizons_by_currency: dict[str, list[str]],
+        initial: Optional[dict[str, dict[str, dict[str, tuple[float, float]]]]] = None,
+    ) -> None:
+        self.clear()
+        if not horizons_by_currency:
+            self.hide()
+            return
+        self.show()
+        self._horizons = {
+            currency: sorted(dict.fromkeys(horizons))
+            for currency, horizons in horizons_by_currency.items()
+        }
+        initial_data = initial or {}
+        for currency in sorted(self._horizons, key=lambda value: value or ""):
+            frame = ttk.Frame(self._notebook)
             frame.columnconfigure(tuple(range(1 + 2 * len(self._SLEEVES))), weight=1)
-            notebook.add(frame, text=self._display_currency(currency))
+            self._notebook.add(frame, text=self._display_currency(currency))
 
             ttk.Label(frame, text="Time horizon").grid(row=0, column=0, padx=4, pady=4, sticky="w")
             for col, (_sleeve, yield_label, tenor_label) in enumerate(self._SLEEVES, start=1):
@@ -235,7 +147,7 @@ class MultiCurrencyRiskDialog(simpledialog.Dialog):
                     row=0, column=2 * col, padx=4, pady=4
                 )
 
-            for row_index, horizon in enumerate(self.horizons_by_currency[currency], start=1):
+            for row_index, horizon in enumerate(self._horizons[currency], start=1):
                 ttk.Label(frame, text=horizon).grid(row=row_index, column=0, sticky="w", padx=4, pady=2)
                 for col_index, (sleeve, _yield_label, _tenor_label) in enumerate(
                     self._SLEEVES, start=1
@@ -243,98 +155,84 @@ class MultiCurrencyRiskDialog(simpledialog.Dialog):
                     yield_var = tk.StringVar()
                     tenor_var = tk.StringVar()
                     initial_sleeve = (
-                        self.initial.get(currency, {})
+                        initial_data.get(currency, {})
                         .get(horizon, {})
                         .get(sleeve)
                     )
-                    tenor_entry_state: list[str] = []
                     if initial_sleeve:
                         yield_var.set(f"{initial_sleeve[0]:.4f}")
                         tenor_var.set(f"{initial_sleeve[1]:.4f}")
                     else:
                         computed_tenor = horizon_to_years(horizon)
                         tenor_var.set(f"{computed_tenor:.4f}")
-                        tenor_entry_state.append("readonly")
-                    yield_entry = ttk.Entry(frame, textvariable=yield_var, width=12)
-                    tenor_entry = ttk.Entry(frame, textvariable=tenor_var, width=10)
-                    yield_entry.grid(row=row_index, column=2 * col_index - 1, padx=4, pady=2)
-                    tenor_entry.grid(row=row_index, column=2 * col_index, padx=4, pady=2)
-                    if tenor_entry_state:
-                        tenor_entry.state(tenor_entry_state)
+                    ttk.Entry(frame, textvariable=yield_var, width=12).grid(
+                        row=row_index,
+                        column=2 * col_index - 1,
+                        padx=4,
+                        pady=2,
+                    )
+                    ttk.Entry(frame, textvariable=tenor_var, width=10).grid(
+                        row=row_index,
+                        column=2 * col_index,
+                        padx=4,
+                        pady=2,
+                    )
                     self._vars[(currency, horizon, sleeve, "yield")] = yield_var
                     self._vars[(currency, horizon, sleeve, "tenor")] = tenor_var
-                    if focus_widget is None:
-                        focus_widget = yield_entry
 
-        return focus_widget
+    def _get_var(self, currency: str, horizon: str, sleeve: str, kind: str) -> tk.StringVar:
+        key = (currency, horizon, sleeve, kind)
+        if key not in self._vars:
+            self._vars[key] = tk.StringVar()
+        return self._vars[key]
 
-    def validate(self) -> bool:
+    def set_status(self, message: str) -> None:
+        self._status_var.set(message)
+
+    def collect(self) -> dict[str, dict[str, dict[str, tuple[float, float]]]]:
+        if not self._horizons:
+            return {}
         data: dict[str, dict[str, dict[str, tuple[float, float]]]] = {}
-        for currency, horizons in self.horizons_by_currency.items():
+        for currency, horizons in self._horizons.items():
             currency_data: dict[str, dict[str, tuple[float, float]]] = {}
             for horizon in horizons:
                 horizon_data: dict[str, tuple[float, float]] = {}
                 for sleeve, _yield_label, _tenor_label in self._SLEEVES:
-                    yield_value = self._vars[(currency, horizon, sleeve, "yield")].get().strip()
-                    tenor_value = self._vars[(currency, horizon, sleeve, "tenor")].get().strip()
-                    if not yield_value:
+                    yield_text = self._get_var(currency, horizon, sleeve, "yield").get().strip()
+                    tenor_text = self._get_var(currency, horizon, sleeve, "tenor").get().strip()
+                    if not yield_text:
                         continue
                     try:
-                        yield_float = float(yield_value)
+                        yield_value = float(yield_text)
                     except ValueError:
-                        messagebox.showerror(
-                            "Invalid risk input",
-                            "Yields must be numeric values.",
-                            parent=self,
-                        )
-                        return False
-                    if tenor_value:
+                        raise ValueError(
+                            "Yields must be numeric values in the risk inputs section."
+                        ) from None
+                    if tenor_text:
                         try:
-                            tenor_float = float(tenor_value)
+                            tenor_value = float(tenor_text)
                         except ValueError:
-                            messagebox.showerror(
-                                "Invalid tenor",
-                                "Tenors must be numeric values when provided.",
-                                parent=self,
-                            )
-                            return False
+                            raise ValueError(
+                                "Tenors must be numeric values in the risk inputs section."
+                            ) from None
                     else:
-                        try:
-                            tenor_float = horizon_to_years(horizon)
-                        except ValueError as exc:
-                            messagebox.showerror("Invalid horizon", str(exc), parent=self)
-                            return False
-                    if tenor_float <= 0:
-                        messagebox.showerror(
-                            "Invalid tenor",
-                            "Tenor must be a positive value.",
-                            parent=self,
-                        )
-                        return False
-                    horizon_data[sleeve] = (yield_float, tenor_float)
+                        tenor_value = horizon_to_years(horizon)
+                    if tenor_value <= 0:
+                        raise ValueError("Tenor values must be positive numbers.")
+                    horizon_data[sleeve] = (yield_value, tenor_value)
                 if not horizon_data:
-                    messagebox.showerror(
-                        "Missing instruments",
-                        f"Provide at least one instrument for {self._display_currency(currency)} horizon {horizon}.",
-                        parent=self,
+                    raise ValueError(
+                        "Provide at least one instrument for each time horizon in the risk inputs section."
                     )
-                    return False
                 currency_data[horizon] = horizon_data
             if currency_data:
                 data[currency] = currency_data
         if not data:
-            messagebox.showerror(
-                "Missing instruments",
-                "Provide at least one instrument to calculate risk metrics.",
-                parent=self,
+            raise ValueError(
+                "Provide at least one instrument to calculate the risk summary."
             )
-            return False
-        self.result = data
-        return True
-
-    def apply(self) -> None:
-        # Result already stored in validate.
-        pass
+        self._status_var.set("")
+        return data
 @dataclass
 class TreeNode:
     allocation: Allocation
@@ -418,6 +316,8 @@ class AllocationApp(ttk.Frame):
         self.grid(column=0, row=0, sticky="nsew")
         self.master.rowconfigure(0, weight=1)
         self.master.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+        self.columnconfigure(0, weight=1)
 
         self._create_menu()
         self._create_widgets()
@@ -448,7 +348,7 @@ class AllocationApp(ttk.Frame):
     def _create_widgets(self) -> None:
         # Toolbar with common actions
         toolbar = ttk.Frame(self)
-        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         toolbar.columnconfigure(tuple(range(10)), weight=1)
 
         ttk.Button(toolbar, text="Add root", command=self._start_add_root).grid(row=0, column=0, padx=2)
@@ -462,9 +362,17 @@ class AllocationApp(ttk.Frame):
         ttk.Button(toolbar, text="Expand all", command=lambda: self._expand_collapse(True)).grid(row=0, column=6, padx=2)
         ttk.Button(toolbar, text="Collapse all", command=lambda: self._expand_collapse(False)).grid(row=0, column=7, padx=2)
 
-        # Tree view with scrollbars
-        tree_frame = ttk.Frame(self)
-        tree_frame.grid(row=1, column=0, sticky="nsew")
+        self.main_notebook = ttk.Notebook(self)
+        self.main_notebook.grid(row=1, column=0, sticky="nsew")
+
+        allocation_tab = ttk.Frame(self.main_notebook)
+        allocation_tab.columnconfigure(0, weight=3)
+        allocation_tab.columnconfigure(1, weight=2)
+        allocation_tab.rowconfigure(0, weight=1)
+        self.main_notebook.add(allocation_tab, text="Allocations")
+
+        tree_frame = ttk.Frame(allocation_tab)
+        tree_frame.grid(row=0, column=0, sticky="nsew")
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
 
@@ -491,9 +399,8 @@ class AllocationApp(ttk.Frame):
         tree_scroll_y.grid(row=0, column=1, sticky="ns")
         tree_scroll_x.grid(row=1, column=0, sticky="ew")
 
-        # Editor form
-        form = ttk.LabelFrame(self, text="Allocation details")
-        form.grid(row=1, column=1, padx=(10, 0), sticky="nsew")
+        form = ttk.LabelFrame(allocation_tab, text="Allocation details")
+        form.grid(row=0, column=1, padx=(10, 0), sticky="nsew")
         form.columnconfigure(1, weight=1)
         form.rowconfigure(8, weight=1)
 
@@ -542,16 +449,26 @@ class AllocationApp(ttk.Frame):
 
         ttk.Label(form, textvariable=self.child_sum_var).grid(row=9, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        # Status bar
-        status = ttk.Label(self, textvariable=self.status_var, anchor="w")
-        status.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        distribution_tab = ttk.Frame(self.main_notebook)
+        distribution_tab.rowconfigure(0, weight=1)
+        distribution_tab.columnconfigure(0, weight=1)
+        self.distribution_tab = distribution_tab
+        self.distribution_panel = DistributionPanel(distribution_tab, self.repo, self._on_distribution_saved)
+        self.distribution_panel.grid(row=0, column=0, sticky="nsew")
+        self.main_notebook.add(distribution_tab, text="Distribute funds")
 
-        self.rowconfigure(1, weight=1)
-        self.columnconfigure(0, weight=3)
-        self.columnconfigure(1, weight=2)
+        history_tab = ttk.Frame(self.main_notebook)
+        history_tab.rowconfigure(0, weight=1)
+        history_tab.columnconfigure(0, weight=1)
+        self.history_tab = history_tab
+        self.history_panel = DistributionHistoryPanel(history_tab, self.repo, self._on_distribution_deleted)
+        self.history_panel.grid(row=0, column=0, sticky="nsew")
+        self.main_notebook.add(history_tab, text="Distribution history")
+
+        status = ttk.Label(self, textvariable=self.status_var, anchor="w")
+        status.grid(row=2, column=0, sticky="ew", pady=(10, 0))
 
         self._set_form_state(False)
-
     # ------------------------------------------------------------------
     # Menu actions
     # ------------------------------------------------------------------
@@ -869,18 +786,22 @@ class AllocationApp(ttk.Frame):
     # Distribution helpers
     # ------------------------------------------------------------------
     def _open_distribution_dialog(self) -> None:
-        DistributionDialog(self.master, self.repo, self._on_distribution_saved)
+        self.main_notebook.select(self.distribution_tab)
+        self.distribution_panel.focus_amount_entry()
 
     def _open_distribution_history(self) -> None:
-        DistributionHistoryDialog(self.master, self.repo, self._on_distribution_deleted)
+        self.main_notebook.select(self.history_tab)
+        self.history_panel.refresh()
 
     def _on_distribution_saved(self, name: str, count: int) -> None:
         self.status_var.set(
             f"Saved distribution '{name}' with {count} recommendation{'s' if count != 1 else ''}."
         )
+        self.history_panel.refresh()
 
     def _on_distribution_deleted(self, name: str) -> None:
         self.status_var.set(f"Deleted distribution '{name}'.")
+        self.history_panel.refresh()
 
     # ------------------------------------------------------------------
     # Tree interactions
@@ -1046,8 +967,8 @@ class AllocationApp(ttk.Frame):
         return " > ".join(reversed(parts)) if parts else ""
 
 
-class DistributionDialog(tk.Toplevel):
-    """Dialog that calculates and persists distribution recommendations."""
+class DistributionPanel(ttk.Frame):
+    """Inline panel that calculates and persists distribution recommendations."""
 
     def __init__(
         self,
@@ -1055,7 +976,7 @@ class DistributionDialog(tk.Toplevel):
         repo: AllocationRepository,
         on_saved: Callable[[str, int], None],
     ) -> None:
-        super().__init__(master)
+        super().__init__(master, padding=10)
         self.repo = repo
         self.on_saved = on_saved
         self.plan_rows: list[PlanRow] = []
@@ -1092,12 +1013,12 @@ class DistributionDialog(tk.Toplevel):
         self.selected_time_horizon_label = default_horizon
         self.summary_var = tk.StringVar(value="Enter an amount and press Calculate.")
 
-        self.title("Distribute funds")
-        self.transient(master)
-        self.grab_set()
-        self.resizable(True, True)
+        self.distribution_name_var = tk.StringVar()
 
-        container = ttk.Frame(self, padding=10)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        container = ttk.Frame(self)
         container.pack(fill="both", expand=True)
 
         form = ttk.Frame(container)
@@ -1106,8 +1027,8 @@ class DistributionDialog(tk.Toplevel):
         form.columnconfigure(4, weight=1)
 
         ttk.Label(form, text="Amount to distribute:").grid(row=0, column=0, sticky="w")
-        amount_entry = ttk.Entry(form, textvariable=self.amount_var, width=18)
-        amount_entry.grid(row=0, column=1, sticky="w", padx=(4, 12))
+        self.amount_entry = ttk.Entry(form, textvariable=self.amount_var, width=18)
+        self.amount_entry.grid(row=0, column=1, sticky="w", padx=(4, 12))
 
         ttk.Label(form, text="Tolerance (pp):").grid(row=0, column=2, sticky="w")
         ttk.Entry(form, textvariable=self.tolerance_var, width=10).grid(
@@ -1143,6 +1064,14 @@ class DistributionDialog(tk.Toplevel):
         tree_frame.pack(fill="both", expand=True, pady=(10, 0))
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
+        # Tkinter widgets override ``__setattr__`` and treat most attribute
+        # assignments as configuration options unless the name starts with an
+        # underscore.  A few of our helpers expect these attributes to exist
+        # before the first notebook refresh, so keep the internal state in
+        # underscored attributes and expose lightweight properties.
+        self._risk_tab: Optional[ttk.Frame] = None
+        self._risk_editor: Optional[RiskInputEditor] = None
+
         self.plan_notebook = ttk.Notebook(tree_frame)
         self.plan_notebook.grid(row=0, column=0, sticky="nsew")
         self._show_empty_state("Enter an amount and press Calculate.")
@@ -1158,6 +1087,10 @@ class DistributionDialog(tk.Toplevel):
 
         button_row = ttk.Frame(container)
         button_row.pack(fill="x", pady=(10, 0))
+        ttk.Label(button_row, text="Distribution name:").pack(side="left")
+        ttk.Entry(button_row, textvariable=self.distribution_name_var, width=36).pack(
+            side="left", padx=(6, 12)
+        )
         self.save_button = ttk.Button(
             button_row,
             text="Save distribution",
@@ -1165,12 +1098,31 @@ class DistributionDialog(tk.Toplevel):
             state="disabled",
         )
         self.save_button.pack(side="left")
-        ttk.Button(button_row, text="Close", command=self.destroy).pack(side="right")
 
-        amount_entry.focus_set()
+        self.amount_entry.focus_set()
+
+    def focus_amount_entry(self) -> None:
+        self.amount_entry.focus_set()
+
+    @property
+    def risk_tab(self) -> Optional[ttk.Frame]:
+        return self._risk_tab
+
+    @risk_tab.setter
+    def risk_tab(self, value: Optional[ttk.Frame]) -> None:
+        self._risk_tab = value
+
+    @property
+    def risk_editor(self) -> Optional[RiskInputEditor]:
+        return self._risk_editor
+
+    @risk_editor.setter
+    def risk_editor(self, value: Optional[RiskInputEditor]) -> None:
+        self._risk_editor = value
 
     def _clear_plan_views(self) -> None:
-        for child in self.plan_notebook.winfo_children():
+        self._remove_risk_tab()
+        for child in list(self.plan_notebook.winfo_children()):
             child.destroy()
         self.currency_trees.clear()
         self.currency_frames.clear()
@@ -1218,6 +1170,54 @@ class DistributionDialog(tk.Toplevel):
         self.currency_trees[currency] = tree
         self.currency_frames[currency] = frame
         return tree
+
+    def _ensure_risk_tab(self) -> RiskInputEditor:
+        if self.risk_tab is None or not self.risk_tab.winfo_exists():
+            frame = ttk.Frame(self.plan_notebook, padding=10)
+            ttk.Label(
+                frame,
+                text=(
+                    "Provide yields and tenors for each required time horizon. "
+                    "Leave a field blank if that sleeve should be skipped for the selected bucket."
+                ),
+                justify="left",
+                wraplength=680,
+                anchor="w",
+            ).pack(fill="x")
+            editor = RiskInputEditor(frame)
+            editor.pack(fill="both", expand=True, pady=(8, 0))
+            self.risk_tab = frame
+            self.risk_editor = editor
+        elif self.risk_editor is None or not self.risk_editor.winfo_exists():
+            editor = RiskInputEditor(self.risk_tab)
+            editor.pack(fill="both", expand=True, pady=(8, 0))
+            self.risk_editor = editor
+        else:
+            editor = self.risk_editor
+
+        tab_id = str(self.risk_tab)
+        if tab_id not in self.plan_notebook.tabs():
+            self.plan_notebook.add(self.risk_tab, text="Risk inputs")
+        else:  # ensure tab label stays consistent
+            self.plan_notebook.tab(self.risk_tab, text="Risk inputs")
+
+        return editor
+
+    def _remove_risk_tab(self) -> None:
+        if self.risk_tab is None:
+            self.risk_editor = None
+            return
+
+        try:
+            self.plan_notebook.forget(self.risk_tab)
+        except tk.TclError:
+            pass
+
+        if self.risk_tab.winfo_exists():
+            self.risk_tab.destroy()
+
+        self.risk_tab = None
+        self.risk_editor = None
 
     @staticmethod
     def _display_currency(currency: str) -> str:
@@ -1409,6 +1409,7 @@ class DistributionDialog(tk.Toplevel):
                 "invest_total": 0.0,
                 "divest_total": 0.0,
             }
+            self.distribution_name_var.set("")
             self._show_empty_state("No plan available. Update your allocations and try again.")
             self.save_button.config(state="disabled")
             return
@@ -1423,6 +1424,9 @@ class DistributionDialog(tk.Toplevel):
         self.tolerance = tolerance
         self.totals = totals
         self.currency_totals = currency_totals
+        if not self.distribution_name_var.get().strip():
+            default_name = datetime.now().strftime("Distribution %Y-%m-%d %H:%M")
+            self.distribution_name_var.set(default_name)
         risk_lines, risk_results = self._build_risk_summary(self.plan_rows_by_currency)
         self.risk_summary_lines = risk_lines
         self.risk_results = risk_results
@@ -1519,23 +1523,24 @@ class DistributionDialog(tk.Toplevel):
             if horizons:
                 horizon_map[currency] = horizons
         if not horizon_map:
+            self._remove_risk_tab()
             return {}, {}
 
-        if len(horizon_map) == 1:
-            currency, horizons = next(iter(horizon_map.items()))
-            initial_inputs = self._risk_inputs.get(currency, {})
-            dialog = HorizonRiskDialog(self, horizons, initial_inputs)
-            if dialog.result is None:
-                return {}, {}
-            input_results = {currency: dialog.result}
-        else:
-            initial_inputs = {
-                currency: self._risk_inputs.get(currency, {}) for currency in horizon_map
+        editor = self._ensure_risk_tab()
+        editor.set_requirements(horizon_map, self._risk_inputs)
+        try:
+            input_results = editor.collect()
+        except ValueError as exc:
+            message = str(exc)
+            editor.set_status(message)
+            notice = {
+                "__overall__": [
+                    "Risk summary – all currencies (equal currency allocation enforced):",
+                    f"  {message}",
+                    "  Update the risk inputs section and calculate again.",
+                ]
             }
-            dialog = MultiCurrencyRiskDialog(self, horizon_map, initial_inputs)
-            if dialog.result is None:
-                return {}, {}
-            input_results = dialog.result
+            return notice, {}
 
         for currency, result in input_results.items():
             self._risk_inputs[currency] = result
@@ -1957,19 +1962,27 @@ class DistributionDialog(tk.Toplevel):
     def _save_distribution(self) -> None:
         if not self.plan_rows:
             return
-        default_name = datetime.now().strftime("Distribution %Y-%m-%d %H:%M")
-        name = simpledialog.askstring(
-            "Save distribution",
-            "Distribution name:",
-            parent=self,
-            initialvalue=default_name,
-        )
-        if name is None:
-            return
-        name = name.strip()
+        name = self.distribution_name_var.get().strip()
         if not name:
-            messagebox.showerror("Missing name", "Please provide a name for the distribution.", parent=self)
+            messagebox.showerror(
+                "Missing name",
+                "Please provide a name for the distribution before saving.",
+                parent=self,
+            )
             return
+
+        if self.risk_editor is not None:
+            try:
+                risk_inputs = self.risk_editor.collect()
+            except ValueError as exc:
+                messagebox.showerror("Invalid risk inputs", str(exc), parent=self)
+                self.risk_editor.set_status(str(exc))
+                return
+        else:
+            risk_inputs = {}
+
+        for currency, result in risk_inputs.items():
+            self._risk_inputs[currency] = result
 
         distribution = Distribution(
             id=None,
@@ -1996,7 +2009,23 @@ class DistributionDialog(tk.Toplevel):
             for row in self.plan_rows
         ]
 
-        self.repo.create_distribution(distribution, entries)
+        risk_records = []
+        for currency, horizons in risk_inputs.items():
+            for horizon, sleeve_data in horizons.items():
+                for sleeve, (yield_value, tenor_value) in sleeve_data.items():
+                    risk_records.append(
+                        DistributionRiskInput(
+                            id=None,
+                            distribution_id=0,
+                            currency=currency,
+                            time_horizon=horizon,
+                            sleeve=sleeve,
+                            yield_value=yield_value,
+                            tenor_value=tenor_value,
+                        )
+                    )
+
+        self.repo.create_distribution(distribution, entries, risk_records)
         self.on_saved(name, len(entries))
         messagebox.showinfo(
             "Distribution saved",
@@ -2007,8 +2036,8 @@ class DistributionDialog(tk.Toplevel):
         self.save_button.config(state="disabled")
 
 
-class DistributionHistoryDialog(tk.Toplevel):
-    """Displays previously stored distribution plans."""
+class DistributionHistoryPanel(ttk.Frame):
+    """Displays previously stored distribution plans inline."""
 
     def __init__(
         self,
@@ -2016,17 +2045,12 @@ class DistributionHistoryDialog(tk.Toplevel):
         repo: AllocationRepository,
         on_deleted: Callable[[str], None],
     ) -> None:
-        super().__init__(master)
+        super().__init__(master, padding=10)
         self.repo = repo
         self.on_deleted = on_deleted
         self.distributions: list[Distribution] = []
 
-        self.title("Distribution history")
-        self.transient(master)
-        self.grab_set()
-        self.resizable(True, True)
-
-        container = ttk.Frame(self, padding=10)
+        container = ttk.Frame(self)
         container.pack(fill="both", expand=True)
 
         paned = ttk.Panedwindow(container, orient="horizontal")
@@ -2100,6 +2124,29 @@ class DistributionHistoryDialog(tk.Toplevel):
         entries_scroll_y.pack(side="right", fill="y", pady=(4, 0))
         entries_scroll_x.pack(side="bottom", fill="x")
 
+        risk_frame = ttk.LabelFrame(right, text="Risk inputs")
+        risk_frame.pack(fill="x", pady=(10, 0))
+        self.risk_tree = ttk.Treeview(
+            risk_frame,
+            columns=("currency", "horizon", "sleeve", "yield", "tenor"),
+            show="headings",
+            height=6,
+        )
+        self.risk_tree.heading("currency", text="Currency")
+        self.risk_tree.heading("horizon", text="Horizon")
+        self.risk_tree.heading("sleeve", text="Sleeve")
+        self.risk_tree.heading("yield", text="Yield %")
+        self.risk_tree.heading("tenor", text="Tenor (y)")
+        self.risk_tree.column("currency", width=100, anchor="center")
+        self.risk_tree.column("horizon", width=80, anchor="center")
+        self.risk_tree.column("sleeve", width=140, anchor="w")
+        self.risk_tree.column("yield", width=80, anchor="e")
+        self.risk_tree.column("tenor", width=90, anchor="e")
+        risk_scroll = ttk.Scrollbar(risk_frame, orient="vertical", command=self.risk_tree.yview)
+        self.risk_tree.configure(yscrollcommand=risk_scroll.set)
+        self.risk_tree.pack(side="left", fill="both", expand=True)
+        risk_scroll.pack(side="right", fill="y")
+
         self.summary_var = tk.StringVar(
             value="Select a distribution to view its recommendations."
         )
@@ -2116,13 +2163,16 @@ class DistributionHistoryDialog(tk.Toplevel):
             state="disabled",
         )
         self.delete_button.pack(side="left")
-        ttk.Button(button_row, text="Close", command=self.destroy).pack(side="right")
+        ttk.Button(button_row, text="Refresh", command=self._load_distributions).pack(side="right")
 
         self._load_distributions()
 
     # ------------------------------------------------------------------
     # Data loading
     # ------------------------------------------------------------------
+    def refresh(self) -> None:
+        self._load_distributions()
+
     def _load_distributions(self) -> None:
         self.distribution_tree.delete(*self.distribution_tree.get_children())
         self.distributions = self.repo.get_distributions()
@@ -2141,6 +2191,7 @@ class DistributionHistoryDialog(tk.Toplevel):
             self.summary_var.set("No distributions saved yet.")
         self.delete_button.config(state="disabled")
         self.entries_tree.delete(*self.entries_tree.get_children())
+        self.risk_tree.delete(*self.risk_tree.get_children())
 
     def _on_distribution_select(self, event: tk.Event[tk.EventType]) -> None:  # pragma: no cover
         selection = self.distribution_tree.selection()
@@ -2148,19 +2199,25 @@ class DistributionHistoryDialog(tk.Toplevel):
             self.entries_tree.delete(*self.entries_tree.get_children())
             self.summary_var.set("Select a distribution to view its recommendations.")
             self.delete_button.config(state="disabled")
+            self.risk_tree.delete(*self.risk_tree.get_children())
             return
         dist_id = int(selection[0])
         distribution = next((d for d in self.distributions if d.id == dist_id), None)
         if not distribution:
             return
         entries = self.repo.get_distribution_entries(dist_id)
-        self._populate_entries(distribution, entries)
+        risk_inputs = self.repo.get_distribution_risk_inputs(dist_id)
+        self._populate_entries(distribution, entries, risk_inputs)
         self.delete_button.config(state="normal")
 
     def _populate_entries(
-        self, distribution: Distribution, entries: List[DistributionEntry]
+        self,
+        distribution: Distribution,
+        entries: List[DistributionEntry],
+        risk_inputs: List[DistributionRiskInput],
     ) -> None:
         self.entries_tree.delete(*self.entries_tree.get_children())
+        self.risk_tree.delete(*self.risk_tree.get_children())
         invest_total = 0.0
         divest_total = 0.0
         for entry in entries:
@@ -2185,12 +2242,45 @@ class DistributionHistoryDialog(tk.Toplevel):
             else:
                 divest_total += entry.recommended_change
 
+        sleeve_labels = {
+            "rates": "Government (DV01)",
+            "tips": "Inflation (BE01)",
+            "credit": "Credit (CS01)",
+        }
+        for record in sorted(
+            risk_inputs,
+            key=lambda item: (
+                (item.currency or ""),
+                item.time_horizon,
+                item.sleeve,
+            ),
+        ):
+            display_currency = self._display_currency(record.currency)
+            display_sleeve = sleeve_labels.get(record.sleeve, record.sleeve.title())
+            yield_text = f"{record.yield_value:.2f}" if record.yield_value is not None else ""
+            tenor_text = f"{record.tenor_value:.2f}" if record.tenor_value is not None else ""
+            self.risk_tree.insert(
+                "",
+                "end",
+                values=(
+                    display_currency,
+                    record.time_horizon,
+                    display_sleeve,
+                    yield_text,
+                    tenor_text,
+                ),
+            )
+
         summary_lines = [
             f"Created: {self._format_timestamp(distribution.created_at)}",
             f"Recorded amount: {_format_amount(distribution.total_amount)}",
             f"Tolerance: {_format_share_delta(distribution.tolerance_percent)}",
             f"Invest: {_format_amount(invest_total)} | Divest: {_format_amount(abs(divest_total))}",
         ]
+        if risk_inputs:
+            summary_lines.append(
+                f"Risk inputs captured: {len(risk_inputs)}"
+            )
         self.summary_var.set("\n".join(summary_lines))
 
     # ------------------------------------------------------------------
@@ -2222,6 +2312,10 @@ class DistributionHistoryDialog(tk.Toplevel):
         except ValueError:  # pragma: no cover - fallback for unexpected formats
             return value
 
+    @staticmethod
+    def _display_currency(value: str) -> str:
+        return value or "Unspecified"
+
 
 def run_app() -> None:  # pragma: no cover - convenience wrapper for CLI usage
     root = tk.Tk()
@@ -2232,6 +2326,10 @@ def run_app() -> None:  # pragma: no cover - convenience wrapper for CLI usage
     AllocationApp(root)
     root.minsize(960, 600)
     root.mainloop()
+
+
+DistributionDialog = DistributionPanel
+DistributionHistoryDialog = DistributionHistoryPanel
 
 
 if __name__ == "__main__":  # pragma: no cover - manual launch only
