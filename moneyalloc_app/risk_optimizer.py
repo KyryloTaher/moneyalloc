@@ -1,10 +1,39 @@
-"""Risk-equal portfolio optimiser for distribution planning."""
+"""Risk-equal portfolio optimiser for distribution planning.
+
+The solver takes a set of *initial distributions*—the target weights for each
+bucket/currency-tenor combination—and translates them into *risk-adjusted final
+allocations*.  The process unfolds in the following steps:
+
+1. **Variable discovery** – For every bucket/sleeve pair that has both a
+   supplied yield and duration we create a decision variable.  Buckets without a
+   usable instrument for a sleeve never receive a variable, so they simply drop
+   out of the optimisation while the other sleeves still participate.
+2. **Objective construction** – We maximise total portfolio yield by asking the
+   linear programme to minimise the negative yields of the discovered decision
+   variables.
+3. **Constraint assembly** – Two families of linear constraints are built:
+   * *Bucket totals*: the variables that belong to the same bucket must sum to
+     that bucket's target weight (normalised to 1.0).  This preserves the user's
+     initial distribution across currencies/tenors.
+   * *Equal risk across sleeves*: for every pair of sleeves that are present in
+     the data we enforce equality of risk contributions by equating their
+     duration-weighted exposures.
+4. **Solve and collate** – The linear programme is solved with SciPy's HiGHS
+   backend.  The decision vector is then aggregated by bucket and sleeve to
+   yield the final risk-balanced allocations.
+
+The public :func:`run_risk_equal_optimization` function encapsulates this flow
+and returns the allocations together with the achieved risk statistics.
+"""
 from __future__ import annotations
 
 import importlib
 import importlib.util
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - imported only for typing
+    import numpy as _np
 
 
 Bucket = str
@@ -13,7 +42,25 @@ Sleeve = str  # "rates", "tips" or "credit"
 
 @dataclass(slots=True)
 class ProblemSpec:
-    """Input specification for the risk optimisation routine."""
+    """Input specification for the risk optimisation routine.
+
+    The :class:`ProblemSpec` mirrors the spreadsheet-style inputs the finance
+    team provides:
+
+    ``bucket_weights``
+        Target percentage weights for each bucket.  The solver normalises them
+        by 100 so the resulting allocations are expressed as fractions of the
+        total portfolio.
+
+    ``*_yields``
+        Expected yields (in percent) for each sleeve.  A ``None`` entry means no
+        investable instrument exists for that bucket/sleeve pair, so it is
+        omitted from the optimisation entirely.
+
+    ``durations``
+        Mapping from ``(bucket, sleeve)`` to the duration used when computing
+        risk contributions.
+    """
 
     bucket_weights: Dict[Bucket, float]
     rates_yields: Dict[Bucket, Optional[float]]
@@ -33,6 +80,53 @@ class RiskOptimizationResult:
     K_tips: float
     K_credit: float
     portfolio_yield: float
+
+
+@dataclass(slots=True)
+class _Workspace:
+    """Internal representation of the linear programme variables and data."""
+
+    keys: List[Tuple[Bucket, Sleeve]]
+    yields: "_np.ndarray"
+    durations_by_sleeve: Dict[Sleeve, "_np.ndarray"]
+
+
+def _build_workspace(spec: ProblemSpec, np) -> _Workspace:
+    """Collect optimisation variables and per-sleeve duration arrays."""
+
+    keys: List[Tuple[Bucket, Sleeve]] = []
+    yield_list: List[float] = []
+    duration_lists: Dict[Sleeve, List[float]] = {"rates": [], "tips": [], "credit": []}
+
+    def maybe_add(bucket: Bucket, sleeve: Sleeve, yield_value: Optional[float]) -> None:
+        if yield_value is None:
+            return
+        duration_key = (bucket, sleeve)
+        if duration_key not in spec.durations:
+            return
+
+        keys.append((bucket, sleeve))
+        yield_list.append(float(yield_value))
+
+        for target_sleeve in ("rates", "tips", "credit"):
+            if target_sleeve == sleeve:
+                duration_lists[target_sleeve].append(float(spec.durations[duration_key]))
+            else:
+                duration_lists[target_sleeve].append(0.0)
+
+    buckets = set(spec.bucket_weights.keys())
+    for bucket in buckets:
+        maybe_add(bucket, "rates", spec.rates_yields.get(bucket))
+        maybe_add(bucket, "tips", spec.tips_yields.get(bucket))
+        maybe_add(bucket, "credit", spec.credit_yields.get(bucket))
+
+    if not keys:
+        raise ValueError("No decision variables defined. Provide yields and durations.")
+
+    yields_array = np.array(yield_list) / 100.0
+    durations_arrays = {sleeve: np.array(values) for sleeve, values in duration_lists.items()}
+
+    return _Workspace(keys=keys, yields=yields_array, durations_by_sleeve=durations_arrays)
 
 
 _NUMPY = None
@@ -67,37 +161,15 @@ def run_risk_equal_optimization(spec: ProblemSpec) -> RiskOptimizationResult:
 
     np, linprog = _load_dependencies()
 
-    keys: List[Tuple[Bucket, Sleeve]] = []
-    yields: List[float] = []
-    d_rates: List[float] = []
-    d_tips: List[float] = []
-    d_credit: List[float] = []
-
-    def maybe_add(bucket: Bucket, sleeve: Sleeve, yield_value: Optional[float]) -> None:
-        if yield_value is None:
-            return
-        if (bucket, sleeve) not in spec.durations:
-            return
-        keys.append((bucket, sleeve))
-        yields.append(float(yield_value))
-        d_rates.append(spec.durations.get((bucket, "rates"), 0.0) if sleeve == "rates" else 0.0)
-        d_tips.append(spec.durations.get((bucket, "tips"), 0.0) if sleeve == "tips" else 0.0)
-        d_credit.append(spec.durations.get((bucket, "credit"), 0.0) if sleeve == "credit" else 0.0)
-
+    workspace = _build_workspace(spec, np)
+    keys = workspace.keys
     buckets = set(spec.bucket_weights.keys())
-    for bucket in buckets:
-        maybe_add(bucket, "rates", spec.rates_yields.get(bucket))
-        maybe_add(bucket, "tips", spec.tips_yields.get(bucket))
-        maybe_add(bucket, "credit", spec.credit_yields.get(bucket))
-
     variable_count = len(keys)
-    if variable_count == 0:
-        raise ValueError("No decision variables defined. Provide yields and durations.")
 
-    y_arr = np.array(yields) / 100.0
-    d_rates_arr = np.array(d_rates)
-    d_tips_arr = np.array(d_tips)
-    d_credit_arr = np.array(d_credit)
+    y_arr = workspace.yields
+    d_rates_arr = workspace.durations_by_sleeve["rates"]
+    d_tips_arr = workspace.durations_by_sleeve["tips"]
+    d_credit_arr = workspace.durations_by_sleeve["credit"]
 
     # Objective: maximise sum(x_i * y_i) -> minimise -sum(...)
     objective = -y_arr
@@ -115,10 +187,30 @@ def run_risk_equal_optimization(spec: ProblemSpec) -> RiskOptimizationResult:
         b_eq.append(spec.bucket_weights[bucket] / 100.0)
 
     # Equal-risk constraints
-    a_eq.append(d_rates_arr.copy() - d_tips_arr.copy())
-    b_eq.append(0.0)
-    a_eq.append(d_rates_arr.copy() - d_credit_arr.copy())
-    b_eq.append(0.0)
+    sleeves_present = {
+        sleeve: any(existing_sleeve == sleeve for _bucket, existing_sleeve in keys)
+        for sleeve in ("rates", "tips", "credit")
+    }
+
+    def add_equal_risk_constraint(left: Sleeve, right: Sleeve) -> None:
+        if not (sleeves_present[left] and sleeves_present[right]):
+            return
+        left_arr = {
+            "rates": d_rates_arr,
+            "tips": d_tips_arr,
+            "credit": d_credit_arr,
+        }[left]
+        right_arr = {
+            "rates": d_rates_arr,
+            "tips": d_tips_arr,
+            "credit": d_credit_arr,
+        }[right]
+        a_eq.append(left_arr.copy() - right_arr.copy())
+        b_eq.append(0.0)
+
+    add_equal_risk_constraint("rates", "tips")
+    add_equal_risk_constraint("rates", "credit")
+    add_equal_risk_constraint("tips", "credit")
 
     a_eq_matrix = np.vstack(a_eq)
     b_eq_vector = np.array(b_eq)
