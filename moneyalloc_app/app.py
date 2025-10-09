@@ -1091,7 +1091,6 @@ class DistributionPanel(ttk.Frame):
             child.destroy()
         self.currency_trees.clear()
         self.currency_frames.clear()
-        self.risk_editor.clear()
 
     def _show_empty_state(self, message: str) -> None:
         self._clear_plan_views()
