@@ -1065,15 +1065,13 @@ class DistributionPanel(ttk.Frame):
         tree_frame.pack(fill="both", expand=True, pady=(10, 0))
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
-        self.risk_editor = RiskInputEditor(container)
-        self.risk_editor.hide()
 
         self.plan_notebook = ttk.Notebook(tree_frame)
         self.plan_notebook.grid(row=0, column=0, sticky="nsew")
-        self._show_empty_state("Enter an amount and press Calculate.")
-
-        self.risk_editor = RiskInputEditor(container)
+        self._risk_editor_container = container
+        self.risk_editor = RiskInputEditor(self._risk_editor_container)
         self.risk_editor.hide()
+        self._show_empty_state("Enter an amount and press Calculate.")
 
         self.summary_label = ttk.Label(
             container,
@@ -1112,6 +1110,8 @@ class DistributionPanel(ttk.Frame):
 
     def _show_empty_state(self, message: str) -> None:
         self._clear_plan_views()
+        if self.risk_editor is None:
+            self.risk_editor = RiskInputEditor(self._risk_editor_container)
         self.risk_editor.clear()
         self.risk_editor.hide()
         frame = ttk.Frame(self.plan_notebook, padding=20)
@@ -1190,7 +1190,6 @@ class DistributionPanel(ttk.Frame):
 
     def _remove_risk_tab(self) -> None:
         if self.risk_tab is None:
-            self.risk_editor = None
             return
 
         try:
