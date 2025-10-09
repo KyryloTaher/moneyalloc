@@ -1561,12 +1561,12 @@ class DistributionDialog(tk.Toplevel):
         credit_yields: dict[str, Optional[float]] = {}
         durations: dict[tuple[str, str], float] = {}
         bucket_currency_map: dict[str, tuple[str, str]] = {}
+        bucket_weights_by_currency: dict[str, dict[str, float]] = {}
+        currency_totals: dict[str, float] = {}
 
         currencies = sorted(horizon_map, key=lambda value: value or "")
-        currency_count = len(currencies)
-        if currency_count == 0:
+        if not currencies:
             return {}, {}
-        currency_equal_share = 1.0 / currency_count
 
         sleeve_labels = {
             "rates": "Government (DV01)",
@@ -1610,9 +1610,10 @@ class DistributionDialog(tk.Toplevel):
                 ]
                 continue
 
-            for bucket, weight in normalized_weights.items():
+            bucket_weights_by_currency[currency] = normalized_weights
+            currency_totals[currency] = total_share
+            for bucket in normalized_weights:
                 combined_key = make_bucket_key(currency, bucket)
-                combined_bucket_weights[combined_key] = weight * currency_equal_share * 100.0
                 bucket_currency_map[combined_key] = (currency, bucket)
 
             for bucket, sleeve_data in selections.items():
@@ -1633,8 +1634,18 @@ class DistributionDialog(tk.Toplevel):
                     tenor = tenor_value if tenor_value is not None else bucket_duration
                     self._risk_selection_details[(currency, bucket, sleeve)] = (yield_value, tenor)
 
-        if not combined_bucket_weights:
+        if not bucket_weights_by_currency:
             return inactive_currency_lines, {}
+
+        investable_total = sum(currency_totals.values())
+        if math.isclose(investable_total, 0.0, abs_tol=1e-9):
+            return inactive_currency_lines, {}
+
+        for currency, bucket_weights in bucket_weights_by_currency.items():
+            currency_share = currency_totals[currency] / investable_total
+            for bucket, weight in bucket_weights.items():
+                combined_key = make_bucket_key(currency, bucket)
+                combined_bucket_weights[combined_key] = weight * currency_share * 100.0
 
         spec = ProblemSpec(
             bucket_weights=combined_bucket_weights,
@@ -1694,7 +1705,14 @@ class DistributionDialog(tk.Toplevel):
 
         for currency in currencies:
             entry = results_map.get(currency)
-            share_percent = entry.currency_share * 100.0 if entry else currency_equal_share * 100.0
+            if entry is not None:
+                share_percent = entry.currency_share * 100.0
+            else:
+                share_percent = (
+                    (currency_totals.get(currency, 0.0) / investable_total) * 100.0
+                    if investable_total > 0.0
+                    else 0.0
+                )
             overall_lines.append(
                 f"    {self._display_currency(currency)}: {share_percent:.2f}%"
             )
