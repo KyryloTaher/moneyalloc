@@ -1064,17 +1064,15 @@ class DistributionPanel(ttk.Frame):
         tree_frame.pack(fill="both", expand=True, pady=(10, 0))
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
-        # Tkinter widgets override ``__setattr__`` and treat most attribute
-        # assignments as configuration options unless the name starts with an
-        # underscore.  A few of our helpers expect these attributes to exist
-        # before the first notebook refresh, so keep the internal state in
-        # underscored attributes and expose lightweight properties.
-        self._risk_tab: Optional[ttk.Frame] = None
-        self._risk_editor: Optional[RiskInputEditor] = None
+        self.risk_editor = RiskInputEditor(container)
+        self.risk_editor.hide()
 
         self.plan_notebook = ttk.Notebook(tree_frame)
         self.plan_notebook.grid(row=0, column=0, sticky="nsew")
         self._show_empty_state("Enter an amount and press Calculate.")
+
+        self.risk_editor = RiskInputEditor(container)
+        self.risk_editor.hide()
 
         self.summary_label = ttk.Label(
             container,
@@ -1104,22 +1102,6 @@ class DistributionPanel(ttk.Frame):
     def focus_amount_entry(self) -> None:
         self.amount_entry.focus_set()
 
-    @property
-    def risk_tab(self) -> Optional[ttk.Frame]:
-        return self._risk_tab
-
-    @risk_tab.setter
-    def risk_tab(self, value: Optional[ttk.Frame]) -> None:
-        self._risk_tab = value
-
-    @property
-    def risk_editor(self) -> Optional[RiskInputEditor]:
-        return self._risk_editor
-
-    @risk_editor.setter
-    def risk_editor(self, value: Optional[RiskInputEditor]) -> None:
-        self._risk_editor = value
-
     def _clear_plan_views(self) -> None:
         self._remove_risk_tab()
         for child in list(self.plan_notebook.winfo_children()):
@@ -1129,6 +1111,8 @@ class DistributionPanel(ttk.Frame):
 
     def _show_empty_state(self, message: str) -> None:
         self._clear_plan_views()
+        self.risk_editor.clear()
+        self.risk_editor.hide()
         frame = ttk.Frame(self.plan_notebook, padding=20)
         ttk.Label(
             frame,
@@ -1523,16 +1507,16 @@ class DistributionPanel(ttk.Frame):
             if horizons:
                 horizon_map[currency] = horizons
         if not horizon_map:
-            self._remove_risk_tab()
+            self.risk_editor.clear()
+            self.risk_editor.hide()
             return {}, {}
 
-        editor = self._ensure_risk_tab()
-        editor.set_requirements(horizon_map, self._risk_inputs)
+        self.risk_editor.set_requirements(horizon_map, self._risk_inputs)
         try:
-            input_results = editor.collect()
+            input_results = self.risk_editor.collect()
         except ValueError as exc:
             message = str(exc)
-            editor.set_status(message)
+            self.risk_editor.set_status(message)
             notice = {
                 "__overall__": [
                     "Risk summary – all currencies (equal currency allocation enforced):",
@@ -1971,15 +1955,12 @@ class DistributionPanel(ttk.Frame):
             )
             return
 
-        if self.risk_editor is not None:
-            try:
-                risk_inputs = self.risk_editor.collect()
-            except ValueError as exc:
-                messagebox.showerror("Invalid risk inputs", str(exc), parent=self)
-                self.risk_editor.set_status(str(exc))
-                return
-        else:
-            risk_inputs = {}
+        try:
+            risk_inputs = self.risk_editor.collect()
+        except ValueError as exc:
+            messagebox.showerror("Invalid risk inputs", str(exc), parent=self)
+            self.risk_editor.set_status(str(exc))
+            return
 
         for currency, result in risk_inputs.items():
             self._risk_inputs[currency] = result
