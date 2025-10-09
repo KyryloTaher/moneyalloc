@@ -999,6 +999,7 @@ class DistributionPanel(ttk.Frame):
         self.risk_results: dict[str, CurrencyRiskResult] = {}
         self.currency_trees: dict[str, ttk.Treeview] = {}
         self.currency_frames: dict[str, ttk.Frame] = {}
+        self.risk_tab: Optional[ttk.Frame] = None
 
         self.amount_var = tk.StringVar(value="0")
         self.tolerance_var = tk.StringVar(value="2.0")
