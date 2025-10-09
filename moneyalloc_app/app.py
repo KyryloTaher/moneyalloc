@@ -98,6 +98,12 @@ class RiskInputEditor(ttk.LabelFrame):
         self._status_label.pack(fill="x", pady=(8, 0))
         self._horizons: dict[str, list[str]] = {}
         self._visible = False
+        self._pack_options: dict[str, object] = {"fill": "x", "pady": (10, 0)}
+
+    def configure_pack(self, **options: object) -> None:
+        """Update geometry options used when displaying the editor."""
+
+        self._pack_options.update(options)
 
     def hide(self) -> None:
         if self._visible:
@@ -106,7 +112,7 @@ class RiskInputEditor(ttk.LabelFrame):
 
     def show(self) -> None:
         if not self._visible:
-            self.pack(fill="x", pady=(10, 0))
+            self.pack(**self._pack_options)
             self._visible = True
 
     def clear(self) -> None:
@@ -1066,6 +1072,7 @@ class DistributionPanel(ttk.Frame):
             wraplength=720,
         )
         self.summary_label.pack(fill="x", pady=(10, 0))
+        self.risk_editor.configure_pack(before=self.summary_label)
 
         button_row = ttk.Frame(container)
         button_row.pack(fill="x", pady=(10, 0))
