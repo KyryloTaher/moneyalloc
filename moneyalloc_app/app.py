@@ -97,6 +97,7 @@ class RiskInputEditor(ttk.LabelFrame):
         )
         self._status_label.pack(fill="x", pady=(8, 0))
         self._horizons: dict[str, list[str]] = {}
+        self._horizon_signature: dict[str, tuple[str, ...]] = {}
         self._visible = False
         self._pack_options: dict[str, object] = {"fill": "x", "pady": (10, 0)}
 
@@ -120,6 +121,7 @@ class RiskInputEditor(ttk.LabelFrame):
             child.destroy()
         self._vars.clear()
         self._horizons = {}
+        self._horizon_signature = {}
         self._status_var.set("")
 
     @staticmethod
@@ -131,15 +133,24 @@ class RiskInputEditor(ttk.LabelFrame):
         horizons_by_currency: dict[str, list[str]],
         initial: Optional[dict[str, dict[str, dict[str, tuple[float, float]]]]] = None,
     ) -> None:
-        self.clear()
-        if not horizons_by_currency:
-            self.hide()
-            return
-        self.show()
-        self._horizons = {
-            currency: sorted(dict.fromkeys(horizons))
+        normalized_horizons = {
+            currency: tuple(sorted(dict.fromkeys(horizons)))
             for currency, horizons in horizons_by_currency.items()
         }
+        if not normalized_horizons:
+            self.clear()
+            self.hide()
+            return
+        if normalized_horizons == self._horizon_signature:
+            if initial:
+                self._apply_initial_values(initial, only_if_empty=True)
+            self.show()
+            return
+
+        self.clear()
+        self.show()
+        self._horizons = {currency: list(values) for currency, values in normalized_horizons.items()}
+        self._horizon_signature = normalized_horizons
         initial_data = initial or {}
         for currency in sorted(self._horizons, key=lambda value: value or ""):
             frame = ttk.Frame(self._notebook)
@@ -185,6 +196,24 @@ class RiskInputEditor(ttk.LabelFrame):
                     )
                     self._vars[(currency, horizon, sleeve, "yield")] = yield_var
                     self._vars[(currency, horizon, sleeve, "tenor")] = tenor_var
+
+    def _apply_initial_values(
+        self,
+        initial: dict[str, dict[str, dict[str, tuple[float, float]]]],
+        *,
+        only_if_empty: bool = False,
+    ) -> None:
+        """Populate entry fields using previously captured input values."""
+
+        for currency, horizons in initial.items():
+            for horizon, sleeve_data in horizons.items():
+                for sleeve, (yield_value, tenor_value) in sleeve_data.items():
+                    yield_var = self._vars.get((currency, horizon, sleeve, "yield"))
+                    tenor_var = self._vars.get((currency, horizon, sleeve, "tenor"))
+                    if yield_var and (not only_if_empty or not yield_var.get().strip()):
+                        yield_var.set(f"{yield_value:.4f}")
+                    if tenor_var and (not only_if_empty or not tenor_var.get().strip()):
+                        tenor_var.set(f"{tenor_value:.4f}")
 
     def _get_var(self, currency: str, horizon: str, sleeve: str, kind: str) -> tk.StringVar:
         key = (currency, horizon, sleeve, kind)
