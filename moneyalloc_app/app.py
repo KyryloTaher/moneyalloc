@@ -2276,8 +2276,8 @@ class DistributionPanel(ttk.Frame):
         self, defaults: dict[str, dict[str, dict[str, tuple[float, float]]]]
     ) -> None:
         self._manual_defaults = deepcopy(defaults)
-        merged: dict[str, dict[str, dict[str, tuple[float, float]]]] = deepcopy(self._manual_defaults)
-        for currency, horizons in self._risk_inputs.items():
+        merged: dict[str, dict[str, dict[str, tuple[float, float]]]] = deepcopy(self._risk_inputs)
+        for currency, horizons in self._manual_defaults.items():
             target_currency = merged.setdefault(currency, {})
             for horizon, sleeves in horizons.items():
                 target_horizon = target_currency.setdefault(horizon, {})
