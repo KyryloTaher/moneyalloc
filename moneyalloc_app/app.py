@@ -568,51 +568,53 @@ class AllocationApp(ttk.Frame):
         self._set_form_state(False)
 
 
-def _ensure_risk_requirements(
-    self, required: dict[str, list[str]]
-) -> None:
-    combined: dict[str, list[str]] = {
-        currency: list(values) for currency, values in self._risk_requirements.items()
-    }
-    for currency, horizons in required.items():
-        existing = set(combined.get(currency, []))
-        existing.update(horizons)
-        combined[currency] = sorted(existing)
-    self.risk_inputs_panel.update_requirements(combined, initial=self._risk_inputs)
-    self._risk_requirements = combined
+    def _ensure_risk_requirements(
+        self, required: dict[str, list[str]]
+    ) -> None:
+        combined: dict[str, list[str]] = {
+            currency: list(values) for currency, values in self._risk_requirements.items()
+        }
+        for currency, horizons in required.items():
+            existing = set(combined.get(currency, []))
+            existing.update(horizons)
+            combined[currency] = sorted(existing)
+        self.risk_inputs_panel.update_requirements(combined, initial=self._risk_inputs)
+        self._risk_requirements = combined
 
-def _collect_risk_inputs(
-    self, required: dict[str, list[str]]
-) -> dict[str, dict[str, dict[str, tuple[float, float]]]]:
-    self._ensure_risk_requirements(required)
-    data = self.risk_inputs_panel.collect_inputs()
-    self._risk_inputs = data
-    return data
+    def _collect_risk_inputs(
+        self, required: dict[str, list[str]]
+    ) -> dict[str, dict[str, dict[str, tuple[float, float]]]]:
+        self._ensure_risk_requirements(required)
+        data = self.risk_inputs_panel.collect_inputs()
+        self._risk_inputs = data
+        return data
 
-def _refresh_risk_inputs_panel(self) -> None:
-    requirements = self._compute_risk_requirements()
-    self._risk_requirements = {
-        currency: sorted(values) for currency, values in requirements.items()
-    }
-    self.risk_inputs_panel.update_requirements(self._risk_requirements, initial=self._risk_inputs)
+    def _refresh_risk_inputs_panel(self) -> None:
+        requirements = self._compute_risk_requirements()
+        self._risk_requirements = {
+            currency: sorted(values) for currency, values in requirements.items()
+        }
+        self.risk_inputs_panel.update_requirements(
+            self._risk_requirements, initial=self._risk_inputs
+        )
 
-def _compute_risk_requirements(self) -> dict[str, set[str]]:
-    allocations = self.repo.get_all_allocations()
-    requirements: dict[str, set[str]] = {}
-    for allocation in allocations:
-        if not allocation.include_in_rollup:
-            continue
-        try:
-            horizon = canonicalize_time_horizon(allocation.time_horizon)
-        except ValueError:
-            continue
-        if not horizon:
-            continue
-        codes = DistributionPanel._parse_currency_codes(allocation.currency)
-        for code in codes or ("",):
-            bucket = requirements.setdefault(code, set())
-            bucket.add(horizon)
-    return requirements
+    def _compute_risk_requirements(self) -> dict[str, set[str]]:
+        allocations = self.repo.get_all_allocations()
+        requirements: dict[str, set[str]] = {}
+        for allocation in allocations:
+            if not allocation.include_in_rollup:
+                continue
+            try:
+                horizon = canonicalize_time_horizon(allocation.time_horizon)
+            except ValueError:
+                continue
+            if not horizon:
+                continue
+            codes = DistributionPanel._parse_currency_codes(allocation.currency)
+            for code in codes or ("",):
+                bucket = requirements.setdefault(code, set())
+                bucket.add(horizon)
+        return requirements
 # ------------------------------------------------------------------
 # Menu actions
 # ------------------------------------------------------------------
