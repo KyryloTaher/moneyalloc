@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import math
 import tkinter as tk
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -268,6 +269,259 @@ class RiskInputEditor(ttk.LabelFrame):
             )
         self._status_var.set("")
         return data
+
+
+class RiskInputLibraryTab(ttk.Frame):
+    """Standalone editor for managing reusable risk input combinations."""
+
+    _SLEEVE_OPTIONS: tuple[str, ...] = tuple(sleeve for sleeve, *_ in RiskInputEditor._SLEEVES)
+    _SLEEVE_LABELS: dict[str, str] = {sleeve: label for sleeve, label, _ in RiskInputEditor._SLEEVES}
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        on_changed: Optional[Callable[[dict[str, dict[str, dict[str, tuple[float, float]]]]], None]] = None,
+        initial: Optional[dict[str, dict[str, dict[str, tuple[float, float]]]]] = None,
+    ) -> None:
+        super().__init__(master, padding=10)
+        self._on_changed = on_changed
+        self._data: dict[str, dict[str, dict[str, tuple[float, float]]]] = deepcopy(initial or {})
+        self._row_mapping: dict[str, tuple[str, str, str]] = {}
+
+        self.currency_var = tk.StringVar()
+        self.horizon_var = tk.StringVar()
+        self.sleeve_var = tk.StringVar(value=self._SLEEVE_OPTIONS[0])
+        self.yield_var = tk.StringVar()
+        self.tenor_var = tk.StringVar()
+        self.status_var = tk.StringVar()
+
+        self.columnconfigure(0, weight=1)
+
+        instructions = (
+            "Build a library of tenor/yield inputs that can be reused when running "
+            "risk calculations. Add one row per currency, time horizon and sleeve."
+        )
+        ttk.Label(self, text=instructions, wraplength=700, justify="left").grid(
+            row=0, column=0, sticky="w"
+        )
+
+        form = ttk.Frame(self)
+        form.grid(row=1, column=0, sticky="ew", pady=(10, 6))
+        form.columnconfigure(1, weight=1)
+        form.columnconfigure(3, weight=1)
+
+        ttk.Label(form, text="Currency code:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(form, textvariable=self.currency_var, width=12).grid(
+            row=0, column=1, sticky="w", padx=(4, 12)
+        )
+
+        ttk.Label(form, text="Time horizon:").grid(row=0, column=2, sticky="w")
+        ttk.Combobox(
+            form,
+            textvariable=self.horizon_var,
+            values=list(DEFAULT_TIME_HORIZONS),
+            width=12,
+        ).grid(row=0, column=3, sticky="w", padx=(4, 12))
+
+        ttk.Label(form, text="Sleeve:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Combobox(
+            form,
+            textvariable=self.sleeve_var,
+            values=self._SLEEVE_OPTIONS,
+            state="readonly",
+            width=12,
+        ).grid(row=1, column=1, sticky="w", padx=(4, 12), pady=(6, 0))
+
+        ttk.Label(form, text="Yield (%):").grid(row=1, column=2, sticky="w", pady=(6, 0))
+        ttk.Entry(form, textvariable=self.yield_var, width=12).grid(
+            row=1, column=3, sticky="w", padx=(4, 12), pady=(6, 0)
+        )
+
+        ttk.Label(form, text="Tenor (years):").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(form, textvariable=self.tenor_var, width=12).grid(
+            row=2, column=1, sticky="w", padx=(4, 12), pady=(6, 0)
+        )
+
+        button_row = ttk.Frame(form)
+        button_row.grid(row=2, column=2, columnspan=2, sticky="e", pady=(6, 0))
+        ttk.Button(button_row, text="Add / update", command=self._add_or_update).pack(
+            side="left"
+        )
+        ttk.Button(button_row, text="Remove selected", command=self._remove_selected).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Button(button_row, text="Clear all", command=self._clear_all).pack(
+            side="left", padx=(6, 0)
+        )
+
+        tree_frame = ttk.Frame(self)
+        tree_frame.grid(row=2, column=0, sticky="nsew")
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+
+        columns = ("currency", "horizon", "sleeve", "yield", "tenor")
+        self.tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show="headings",
+            height=12,
+        )
+        self.tree.heading("currency", text="Currency")
+        self.tree.heading("horizon", text="Horizon")
+        self.tree.heading("sleeve", text="Sleeve")
+        self.tree.heading("yield", text="Yield %")
+        self.tree.heading("tenor", text="Tenor (y)")
+        self.tree.column("currency", width=110, anchor="center")
+        self.tree.column("horizon", width=90, anchor="center")
+        self.tree.column("sleeve", width=160, anchor="w")
+        self.tree.column("yield", width=90, anchor="e")
+        self.tree.column("tenor", width=100, anchor="e")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+
+        ttk.Label(self, textvariable=self.status_var, foreground="#aa0000", anchor="w").grid(
+            row=3, column=0, sticky="ew", pady=(6, 0)
+        )
+
+        self.rowconfigure(2, weight=1)
+        self._refresh_tree()
+
+    def _emit_change(self) -> None:
+        if self._on_changed:
+            self._on_changed(self.get_data())
+
+    def _refresh_tree(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        self._row_mapping.clear()
+        for currency in sorted(self._data, key=lambda value: value or ""):
+            horizons = self._data[currency]
+            for horizon in sorted(horizons):
+                sleeves = horizons[horizon]
+                for sleeve in sorted(sleeves):
+                    yield_value, tenor_value = sleeves[sleeve]
+                    item_id = f"{currency}\u241f{horizon}\u241f{sleeve}"
+                    self.tree.insert(
+                        "",
+                        "end",
+                        iid=item_id,
+                        values=(
+                            self._display_currency(currency),
+                            horizon,
+                            self._SLEEVE_LABELS.get(sleeve, sleeve),
+                            f"{yield_value:.4f}",
+                            f"{tenor_value:.4f}",
+                        ),
+                    )
+                    self._row_mapping[item_id] = (currency, horizon, sleeve)
+
+    @staticmethod
+    def _display_currency(currency: str) -> str:
+        return RiskInputEditor._display_currency(currency)
+
+    def _add_or_update(self) -> None:
+        currency_text = self.currency_var.get().strip().upper()
+        currency_key = "" if currency_text in _UNSPECIFIED_CURRENCY_ALIASES else currency_text
+
+        horizon_text = self.horizon_var.get().strip().upper()
+        if not horizon_text:
+            self.status_var.set("Provide a time horizon (for example 1Y or 6M).")
+            return
+        try:
+            horizon_value = canonicalize_time_horizon(horizon_text)
+        except ValueError:
+            self.status_var.set(
+                "Time horizon must follow the '<number><unit>' pattern (e.g. 1Y, 3M, 6W or 10D)."
+            )
+            return
+
+        sleeve_value = self.sleeve_var.get().strip()
+        if sleeve_value not in self._SLEEVE_OPTIONS:
+            self.status_var.set("Select a sleeve before adding the entry.")
+            return
+
+        yield_text = self.yield_var.get().strip()
+        if not yield_text:
+            self.status_var.set("Enter a yield percentage for the selected sleeve.")
+            return
+        try:
+            yield_value = float(yield_text)
+        except ValueError:
+            self.status_var.set("Yield must be a numeric value.")
+            return
+
+        tenor_text = self.tenor_var.get().strip()
+        if tenor_text:
+            try:
+                tenor_value = float(tenor_text)
+            except ValueError:
+                self.status_var.set("Tenor must be a numeric value in years.")
+                return
+        else:
+            tenor_value = horizon_to_years(horizon_value)
+
+        if tenor_value <= 0:
+            self.status_var.set("Tenor must be a positive value.")
+            return
+
+        currency_bucket = self._data.setdefault(currency_key, {})
+        horizon_bucket = currency_bucket.setdefault(horizon_value, {})
+        horizon_bucket[sleeve_value] = (yield_value, tenor_value)
+
+        self.status_var.set("")
+        self._refresh_tree()
+        self._emit_change()
+
+    def _remove_selected(self) -> None:
+        removed = False
+        for item_id in list(self.tree.selection()):
+            mapping = self._row_mapping.get(item_id)
+            if not mapping:
+                continue
+            currency, horizon, sleeve = mapping
+            currency_bucket = self._data.get(currency)
+            if not currency_bucket:
+                continue
+            horizon_bucket = currency_bucket.get(horizon)
+            if not horizon_bucket:
+                continue
+            horizon_bucket.pop(sleeve, None)
+            if not horizon_bucket:
+                currency_bucket.pop(horizon, None)
+            if not currency_bucket:
+                self._data.pop(currency, None)
+            removed = True
+        if removed:
+            self.status_var.set("")
+            self._refresh_tree()
+            self._emit_change()
+
+    def _clear_all(self) -> None:
+        if not self._data:
+            return
+        self._data.clear()
+        self._refresh_tree()
+        self._emit_change()
+
+    def _on_tree_select(self, event: tk.Event[tk.EventType]) -> None:  # pragma: no cover - UI glue
+        selection = self.tree.selection()
+        if not selection:
+            return
+        mapping = self._row_mapping.get(selection[0])
+        if not mapping:
+            return
+        currency, horizon, sleeve = mapping
+        yield_value, tenor_value = self._data[currency][horizon][sleeve]
+        self.currency_var.set(currency)
+        self.horizon_var.set(horizon)
+        self.sleeve_var.set(sleeve)
+        self.yield_var.set(f"{yield_value:.4f}")
+        self.tenor_var.set(f"{tenor_value:.4f}")
+
+    def get_data(self) -> dict[str, dict[str, dict[str, tuple[float, float]]]]:
+        return deepcopy(self._data)
 @dataclass
 class TreeNode:
     allocation: Allocation
@@ -355,6 +609,8 @@ class AllocationApp(ttk.Frame):
         self.columnconfigure(0, weight=1)
 
         self._create_menu()
+        self.risk_library_defaults: dict[str, dict[str, dict[str, tuple[float, float]]]] = {}
+
         self._create_widgets()
         self.refresh_tree()
 
@@ -483,9 +739,22 @@ class AllocationApp(ttk.Frame):
         distribution_tab.rowconfigure(0, weight=1)
         distribution_tab.columnconfigure(0, weight=1)
         self.distribution_tab = distribution_tab
-        self.distribution_panel = DistributionPanel(distribution_tab, self.repo, self._on_distribution_saved)
+        self.distribution_panel = DistributionPanel(
+            distribution_tab,
+            self.repo,
+            self._on_distribution_saved,
+            default_risk_inputs=self.risk_library_defaults,
+        )
         self.distribution_panel.grid(row=0, column=0, sticky="nsew")
         self.main_notebook.add(distribution_tab, text="Distribute funds")
+
+        risk_tab = RiskInputLibraryTab(
+            self.main_notebook,
+            on_changed=self._on_risk_library_changed,
+            initial=self.risk_library_defaults,
+        )
+        self.risk_library_tab = risk_tab
+        self.main_notebook.add(risk_tab, text="Risk input library")
 
         history_tab = ttk.Frame(self.main_notebook)
         history_tab.rowconfigure(0, weight=1)
@@ -499,6 +768,12 @@ class AllocationApp(ttk.Frame):
         status.grid(row=2, column=0, sticky="ew", pady=(10, 0))
 
         self._set_form_state(False)
+
+    def _on_risk_library_changed(
+        self, data: dict[str, dict[str, dict[str, tuple[float, float]]]]
+    ) -> None:
+        self.risk_library_defaults = data
+        self.distribution_panel.update_default_risk_inputs(data)
     # ------------------------------------------------------------------
     # Menu actions
     # ------------------------------------------------------------------
@@ -997,6 +1272,8 @@ class DistributionPanel(ttk.Frame):
         master: tk.Misc,
         repo: AllocationRepository,
         on_saved: Callable[[str, int], None],
+        *,
+        default_risk_inputs: Optional[dict[str, dict[str, dict[str, tuple[float, float]]]]] = None,
     ) -> None:
         super().__init__(master, padding=10)
         self.repo = repo
@@ -1013,7 +1290,12 @@ class DistributionPanel(ttk.Frame):
             "divest_total": 0.0,
         }
         self.selected_currencies: Optional[list[str]] = None
-        self._risk_inputs: dict[str, dict[str, dict[str, tuple[float, float]]]] = {}
+        self._manual_defaults: dict[str, dict[str, dict[str, tuple[float, float]]]] = deepcopy(
+            default_risk_inputs or {}
+        )
+        self._risk_inputs: dict[str, dict[str, dict[str, tuple[float, float]]]] = deepcopy(
+            self._manual_defaults
+        )
         self._risk_selection_details: dict[
             tuple[str, str, str], tuple[Optional[float], Optional[float]]
         ] = {}
@@ -1021,6 +1303,7 @@ class DistributionPanel(ttk.Frame):
         self.risk_results: dict[str, CurrencyRiskResult] = {}
         self.currency_trees: dict[str, ttk.Treeview] = {}
         self.currency_frames: dict[str, ttk.Frame] = {}
+        self._last_horizon_requirements: dict[str, list[str]] = {}
 
         self.amount_var = tk.StringVar(value="0")
         self.tolerance_var = tk.StringVar(value="2.0")
@@ -1132,6 +1415,7 @@ class DistributionPanel(ttk.Frame):
         self._clear_plan_views()
         self.risk_editor.clear()
         self.risk_editor.hide()
+        self._last_horizon_requirements = {}
         frame = ttk.Frame(self.plan_notebook, padding=20)
         ttk.Label(
             frame,
@@ -1482,6 +1766,7 @@ class DistributionPanel(ttk.Frame):
             self.risk_editor.hide()
             return {}, {}
 
+        self._last_horizon_requirements = {currency: list(horizons) for currency, horizons in horizon_map.items()}
         self.risk_editor.set_requirements(horizon_map, self._risk_inputs)
         try:
             input_results = self.risk_editor.collect()
@@ -1986,6 +2271,20 @@ class DistributionPanel(ttk.Frame):
             parent=self,
         )
         self.save_button.config(state="disabled")
+
+    def update_default_risk_inputs(
+        self, defaults: dict[str, dict[str, dict[str, tuple[float, float]]]]
+    ) -> None:
+        self._manual_defaults = deepcopy(defaults)
+        merged: dict[str, dict[str, dict[str, tuple[float, float]]]] = deepcopy(self._manual_defaults)
+        for currency, horizons in self._risk_inputs.items():
+            target_currency = merged.setdefault(currency, {})
+            for horizon, sleeves in horizons.items():
+                target_horizon = target_currency.setdefault(horizon, {})
+                target_horizon.update(sleeves)
+        self._risk_inputs = merged
+        if self._last_horizon_requirements:
+            self.risk_editor.set_requirements(self._last_horizon_requirements, self._risk_inputs)
 
 
 class DistributionHistoryPanel(ttk.Frame):
