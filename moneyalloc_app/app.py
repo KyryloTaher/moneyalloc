@@ -355,6 +355,7 @@ class CurrencyRiskResult:
     allocations: dict[tuple[str, str], float]
     by_bucket: dict[str, float]
     by_sleeve: dict[str, float]
+    per_bucket_sleeve: dict[str, dict[str, float]]
     currency_share: float
 
 
@@ -1714,8 +1715,11 @@ class DistributionPanel(ttk.Frame):
                         tips_yields[combined_key] = yield_value
                     elif sleeve == "credit":
                         credit_yields[combined_key] = yield_value
-                    durations[(combined_key, sleeve)] = bucket_duration
-                    tenor = tenor_value if tenor_value is not None else bucket_duration
+                    if tenor_value is not None and tenor_value > 0:
+                        tenor = float(tenor_value)
+                    else:
+                        tenor = bucket_duration
+                    durations[(combined_key, sleeve)] = tenor
                     self._risk_selection_details[(currency, bucket, sleeve)] = (yield_value, tenor)
 
         if not bucket_weights_by_currency:
@@ -1758,6 +1762,7 @@ class DistributionPanel(ttk.Frame):
                     allocations={},
                     by_bucket={},
                     by_sleeve={"rates": 0.0, "tips": 0.0, "credit": 0.0},
+                    per_bucket_sleeve={},
                     currency_share=0.0,
                 )
                 results_map[currency] = entry
@@ -1774,6 +1779,8 @@ class DistributionPanel(ttk.Frame):
             entry = ensure_currency_entry(currency)
             entry.allocations[(bucket, sleeve)] = value
             entry.by_sleeve[sleeve] = entry.by_sleeve.get(sleeve, 0.0) + value
+            bucket_map = entry.per_bucket_sleeve.setdefault(bucket, {})
+            bucket_map[sleeve] = bucket_map.get(sleeve, 0.0) + value
 
         lines_map: dict[str, list[str]] = dict(inactive_currency_lines)
 
@@ -1831,11 +1838,35 @@ class DistributionPanel(ttk.Frame):
                 for sleeve, (yield_value, tenor_value) in selections[bucket].items():
                     if yield_value is None:
                         continue
-                    tenor_display = tenor_value if tenor_value is not None else bucket_duration
+                    if tenor_value is not None and tenor_value > 0:
+                        tenor_display = tenor_value
+                    else:
+                        tenor_display = bucket_duration
                     label = sleeve_labels.get(sleeve, sleeve.capitalize())
                     lines.append(
                         f"    {bucket}: {label} | Yield {yield_value:.2f}% | Tenor {tenor_display:.2f}y"
                     )
+
+            if entry.per_bucket_sleeve:
+                lines.append("  Sleeve distribution by tenor:")
+                for bucket in sorted(entry.per_bucket_sleeve, key=lambda name: (-entry.by_bucket.get(name, 0.0), name)):
+                    sleeve_totals = entry.per_bucket_sleeve.get(bucket, {})
+                    if not sleeve_totals:
+                        continue
+                    bucket_share = entry.by_bucket.get(bucket, 0.0)
+                    breakdown_parts: list[str] = []
+                    for sleeve, share in sorted(sleeve_totals.items(), key=lambda item: (-item[1], item[0])):
+                        label = sleeve_labels.get(sleeve, sleeve.capitalize())
+                        total_pct = share * 100.0
+                        if bucket_share > 0:
+                            bucket_pct = (share / bucket_share) * 100.0
+                        else:  # pragma: no cover - defensive
+                            bucket_pct = 0.0
+                        breakdown_parts.append(
+                            f"{label}: {bucket_pct:.2f}% of tenor ({total_pct:.2f}% total)"
+                        )
+                    if breakdown_parts:
+                        lines.append(f"    {bucket}: " + " | ".join(breakdown_parts))
 
             lines.append("  Sleeve allocation (share of total investable funds):")
             for sleeve, total in sorted(entry.by_sleeve.items()):
