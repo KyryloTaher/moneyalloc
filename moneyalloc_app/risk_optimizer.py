@@ -1,39 +1,8 @@
-"""Risk-equal portfolio optimiser for distribution planning.
-
-The solver takes a set of *initial distributions*—the target weights for each
-bucket/currency-tenor combination—and translates them into *risk-adjusted final
-allocations*.  The process unfolds in the following steps:
-
-1. **Variable discovery** – For every bucket/sleeve pair that has both a
-   supplied yield and duration we create a decision variable.  Buckets without a
-   usable instrument for a sleeve never receive a variable, so they simply drop
-   out of the optimisation while the other sleeves still participate.
-2. **Objective construction** – We maximise total portfolio yield by asking the
-   linear programme to minimise the negative yields of the discovered decision
-   variables.
-3. **Constraint assembly** – Two families of linear constraints are built:
-   * *Bucket totals*: the variables that belong to the same bucket must sum to
-     that bucket's target weight (normalised to 1.0).  This preserves the user's
-     initial distribution across currencies/tenors.
-   * *Equal risk across sleeves*: for every pair of sleeves that are present in
-     the data we enforce equality of risk contributions by equating their
-     duration-weighted exposures.
-4. **Solve and collate** – The linear programme is solved with SciPy's HiGHS
-   backend.  The decision vector is then aggregated by bucket and sleeve to
-   yield the final risk-balanced allocations.
-
-The public :func:`run_risk_equal_optimization` function encapsulates this flow
-and returns the allocations together with the achieved risk statistics.
-"""
+"""Risk-aware distribution optimisation utilities."""
 from __future__ import annotations
 
-import importlib
-import importlib.util
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
-
-if TYPE_CHECKING:  # pragma: no cover - imported only for typing
-    import numpy as _np
+from typing import Dict, Iterable, Tuple
 
 
 Bucket = str
@@ -42,213 +11,203 @@ Sleeve = str  # "rates", "tips" or "credit"
 
 @dataclass(slots=True)
 class ProblemSpec:
-    """Input specification for the risk optimisation routine.
-
-    The :class:`ProblemSpec` mirrors the spreadsheet-style inputs the finance
-    team provides:
-
-    ``bucket_weights``
-        Target percentage weights for each bucket.  The solver normalises them
-        by 100 so the resulting allocations are expressed as fractions of the
-        total portfolio.
-
-    ``*_yields``
-        Expected yields (in percent) for each sleeve.  A ``None`` entry means no
-        investable instrument exists for that bucket/sleeve pair, so it is
-        omitted from the optimisation entirely.
-
-    ``durations``
-        Mapping from ``(bucket, sleeve)`` to the duration used when computing
-        risk contributions.
-    """
+    """Input specification for the risk optimisation routine."""
 
     bucket_weights: Dict[Bucket, float]
-    rates_yields: Dict[Bucket, Optional[float]]
-    tips_yields: Dict[Bucket, Optional[float]]
-    credit_yields: Dict[Bucket, Optional[float]]
-    durations: Dict[Tuple[Bucket, Sleeve], float]
+    bucket_horizons: Dict[Bucket, float]
+    tenors: Dict[Tuple[Bucket, Sleeve], float]
 
 
 @dataclass(slots=True)
 class RiskOptimizationResult:
-    """Container for the outcome of the optimisation."""
+    """Container describing the optimised allocations."""
 
     allocations: Dict[Tuple[Bucket, Sleeve], float]
     by_bucket: Dict[Bucket, float]
     by_sleeve: Dict[Sleeve, float]
-    K_rates: float
-    K_tips: float
-    K_credit: float
-    portfolio_yield: float
 
 
-@dataclass(slots=True)
-class _Workspace:
-    """Internal representation of the linear programme variables and data."""
-
-    keys: List[Tuple[Bucket, Sleeve]]
-    yields: "_np.ndarray"
-    durations_by_sleeve: Dict[Sleeve, "_np.ndarray"]
+_FLOAT_TOLERANCE = 1e-9
 
 
-def _build_workspace(spec: ProblemSpec, np) -> _Workspace:
-    """Collect optimisation variables and per-sleeve duration arrays."""
+def _normalise_weights(values: Dict[Bucket, float]) -> Dict[Bucket, float]:
+    """Return weights normalised to sum to one."""
 
-    keys: List[Tuple[Bucket, Sleeve]] = []
-    yield_list: List[float] = []
-    duration_lists: Dict[Sleeve, List[float]] = {"rates": [], "tips": [], "credit": []}
+    positive = {bucket: float(weight) for bucket, weight in values.items() if weight > 0.0}
+    if not positive:
+        raise ValueError("At least one positive bucket weight is required for optimisation.")
 
-    def maybe_add(bucket: Bucket, sleeve: Sleeve, yield_value: Optional[float]) -> None:
-        if yield_value is None:
-            return
-        duration_key = (bucket, sleeve)
-        if duration_key not in spec.durations:
-            return
+    total = sum(positive.values())
+    if total <= 0.0:
+        raise ValueError("Bucket weights must sum to a positive value.")
 
-        keys.append((bucket, sleeve))
-        yield_list.append(float(yield_value))
-
-        for target_sleeve in ("rates", "tips", "credit"):
-            if target_sleeve == sleeve:
-                duration_lists[target_sleeve].append(float(spec.durations[duration_key]))
-            else:
-                duration_lists[target_sleeve].append(0.0)
-
-    buckets = set(spec.bucket_weights.keys())
-    for bucket in buckets:
-        maybe_add(bucket, "rates", spec.rates_yields.get(bucket))
-        maybe_add(bucket, "tips", spec.tips_yields.get(bucket))
-        maybe_add(bucket, "credit", spec.credit_yields.get(bucket))
-
-    if not keys:
-        raise ValueError("No decision variables defined. Provide yields and durations.")
-
-    yields_array = np.array(yield_list) / 100.0
-    durations_arrays = {sleeve: np.array(values) for sleeve, values in duration_lists.items()}
-
-    return _Workspace(keys=keys, yields=yields_array, durations_by_sleeve=durations_arrays)
+    return {bucket: weight / total for bucket, weight in positive.items()}
 
 
-_NUMPY = None
-_LINPROG = None
+def _sorted_buckets(weights: Dict[Bucket, float], horizons: Dict[Bucket, float]) -> Iterable[Bucket]:
+    """Return bucket identifiers sorted by ascending horizon then name."""
+
+    missing = [bucket for bucket in weights if bucket not in horizons]
+    if missing:
+        missing_list = ", ".join(sorted(missing))
+        raise ValueError(f"Missing horizon information for: {missing_list}")
+
+    return sorted(weights, key=lambda bucket: (horizons[bucket], bucket))
 
 
-def _load_dependencies():
-    global _NUMPY, _LINPROG
-    if _NUMPY is not None and _LINPROG is not None:
-        return _NUMPY, _LINPROG
+def _tenors_for_bucket(
+    bucket: Bucket,
+    *,
+    horizons: Dict[Bucket, float],
+    tenors: Dict[Tuple[Bucket, Sleeve], float],
+    previous: Dict[Sleeve, float],
+) -> Dict[Sleeve, float]:
+    """Return sleeves available for the provided bucket."""
 
-    numpy_spec = importlib.util.find_spec("numpy")
-    if numpy_spec is None:
-        raise RuntimeError(
-            "numpy is required for risk calculations. Install numpy to enable this feature."
-        )
-    scipy_spec = importlib.util.find_spec("scipy.optimize")
-    if scipy_spec is None:
-        raise RuntimeError(
-            "scipy is required for risk calculations. Install scipy to enable this feature."
-        )
+    bucket_horizon = horizons[bucket]
+    available: Dict[Sleeve, float] = {}
 
-    numpy_module = importlib.import_module("numpy")
-    scipy_optimize = importlib.import_module("scipy.optimize")
-    _NUMPY = numpy_module
-    _LINPROG = scipy_optimize.linprog
-    return _NUMPY, _LINPROG
+    for (source_bucket, sleeve), tenor in tenors.items():
+        if tenor is None:
+            continue
+        tenor_value = float(tenor)
+        if tenor_value <= 0.0:
+            continue
+        source_horizon = horizons.get(source_bucket)
+        if source_horizon is None:
+            continue
+        if source_horizon - bucket_horizon > _FLOAT_TOLERANCE:
+            continue
+        if tenor_value - bucket_horizon > _FLOAT_TOLERANCE:
+            continue
+        existing = available.get(sleeve)
+        if existing is None or tenor_value < existing:
+            available[sleeve] = tenor_value
+
+    # Ensure sleeves from previous stages remain available even if no new
+    # tenor is supplied for the current bucket.
+    for sleeve, tenor in previous.items():
+        available.setdefault(sleeve, tenor)
+
+    if not available:
+        raise ValueError(f"No sleeves with tenor <= horizon found for bucket {bucket}.")
+
+    return available
+
+
+def _distribute_remaining(
+    allocations: Dict[Sleeve, float],
+    remaining: float,
+    sleeves: Dict[Sleeve, float],
+) -> None:
+    """Distribute the remaining allocation using inverse-tenor weights."""
+
+    if remaining <= _FLOAT_TOLERANCE:
+        return
+
+    inverse_weights = {sleeve: 1.0 / tenor for sleeve, tenor in sleeves.items() if tenor > 0.0}
+    weight_total = sum(inverse_weights.values())
+    if weight_total <= 0.0:
+        raise ValueError("Unable to determine sleeve weights for optimisation.")
+
+    running_total = 0.0
+    ordered = sorted(sleeves.items(), key=lambda item: (item[1], item[0]))
+    for sleeve, tenor in ordered[:-1]:
+        share = inverse_weights[sleeve] / weight_total
+        addition = remaining * share
+        allocations[sleeve] = allocations.get(sleeve, 0.0) + addition
+        running_total += addition
+
+    # Assign any residual amount to the sleeve with the lowest tenor to keep
+    # totals consistent and bias towards lower duration risk.
+    last_sleeve = ordered[-1][0]
+    residual = remaining - running_total
+    allocations[last_sleeve] = allocations.get(last_sleeve, 0.0) + residual
 
 
 def run_risk_equal_optimization(spec: ProblemSpec) -> RiskOptimizationResult:
-    """Solve the risk-equal linear programme for the provided specification."""
+    """Optimise allocations using a cascading risk-aware algorithm."""
 
-    np, linprog = _load_dependencies()
+    normalised = _normalise_weights(spec.bucket_weights)
+    ordered_buckets = tuple(_sorted_buckets(normalised, spec.bucket_horizons))
 
-    workspace = _build_workspace(spec, np)
-    keys = workspace.keys
-    buckets = set(spec.bucket_weights.keys())
-    variable_count = len(keys)
+    cumulative_targets: Dict[Bucket, float] = {}
+    running_total = 0.0
+    for bucket in ordered_buckets:
+        running_total += normalised[bucket]
+        cumulative_targets[bucket] = running_total
 
-    y_arr = workspace.yields
-    d_rates_arr = workspace.durations_by_sleeve["rates"]
-    d_tips_arr = workspace.durations_by_sleeve["tips"]
-    d_credit_arr = workspace.durations_by_sleeve["credit"]
+    previous_sleeves: Dict[Sleeve, float] = {}
+    cumulative_allocations: Dict[Bucket, Dict[Sleeve, float]] = {}
 
-    # Objective: maximise sum(x_i * y_i) -> minimise -sum(...)
-    objective = -y_arr
+    for bucket in ordered_buckets:
+        sleeves = _tenors_for_bucket(
+            bucket,
+            horizons=spec.bucket_horizons,
+            tenors=spec.tenors,
+            previous=previous_sleeves,
+        )
+        target_total = cumulative_targets[bucket]
+        allocations = {sleeve: previous_sleeves.get(sleeve, 0.0) for sleeve in sleeves}
+        already_assigned = sum(allocations.values())
 
-    a_eq: List[Iterable[float]] = []
-    b_eq: List[float] = []
+        if already_assigned - target_total > _FLOAT_TOLERANCE:
+            raise ValueError(
+                "Cumulative bucket weights must be non-decreasing with respect to time horizon."
+            )
 
-    # Bucket-sum constraints: each bucket must match its target weight
-    for bucket in buckets:
-        row = np.zeros(variable_count)
-        for index, (bucket_name, _sleeve) in enumerate(keys):
-            if bucket_name == bucket:
-                row[index] = 1.0
-        a_eq.append(row)
-        b_eq.append(spec.bucket_weights[bucket] / 100.0)
+        remaining = target_total - already_assigned
+        _distribute_remaining(allocations, remaining, sleeves)
 
-    # Equal-risk constraints
-    sleeves_present = {
-        sleeve: any(existing_sleeve == sleeve for _bucket, existing_sleeve in keys)
-        for sleeve in ("rates", "tips", "credit")
-    }
-
-    def add_equal_risk_constraint(left: Sleeve, right: Sleeve) -> None:
-        if not (sleeves_present[left] and sleeves_present[right]):
-            return
-        left_arr = {
-            "rates": d_rates_arr,
-            "tips": d_tips_arr,
-            "credit": d_credit_arr,
-        }[left]
-        right_arr = {
-            "rates": d_rates_arr,
-            "tips": d_tips_arr,
-            "credit": d_credit_arr,
-        }[right]
-        a_eq.append(left_arr.copy() - right_arr.copy())
-        b_eq.append(0.0)
-
-    add_equal_risk_constraint("rates", "tips")
-    add_equal_risk_constraint("rates", "credit")
-    add_equal_risk_constraint("tips", "credit")
-
-    a_eq_matrix = np.vstack(a_eq)
-    b_eq_vector = np.array(b_eq)
-
-    bounds = [(0.0, None) for _ in range(variable_count)]
-
-    result = linprog(objective, A_eq=a_eq_matrix, b_eq=b_eq_vector, bounds=bounds, method="highs")
-
-    if not result.success:
-        raise RuntimeError(f"Optimization failed: {result.message}")
-
-    solution = result.x
-
-    k_rates = float(np.dot(d_rates_arr, solution))
-    k_tips = float(np.dot(d_tips_arr, solution))
-    k_credit = float(np.dot(d_credit_arr, solution))
-    portfolio_yield = float(np.dot(y_arr, solution))
+        cumulative_allocations[bucket] = allocations
+        previous_sleeves = dict(allocations)
 
     allocations: Dict[Tuple[Bucket, Sleeve], float] = {}
-    for index, key in enumerate(keys):
-        allocations[key] = float(solution[index])
+    by_bucket: Dict[Bucket, float] = {}
+    by_sleeve: Dict[Sleeve, float] = {}
 
-    by_bucket: Dict[Bucket, float] = {bucket: 0.0 for bucket in buckets}
-    for (bucket, _sleeve), value in allocations.items():
-        by_bucket[bucket] += value
+    previous_totals: Dict[Sleeve, float] = {}
+    for bucket in ordered_buckets:
+        current = cumulative_allocations[bucket]
+        bucket_total = 0.0
+        for sleeve, value in current.items():
+            previous_value = previous_totals.get(sleeve, 0.0)
+            increment = value - previous_value
+            if increment < -_FLOAT_TOLERANCE:
+                raise ValueError("Computed negative allocation increment; check inputs for consistency.")
+            if increment < 0.0:
+                increment = 0.0
+            allocations[(bucket, sleeve)] = increment
+            bucket_total += increment
+            by_sleeve[sleeve] = by_sleeve.get(sleeve, 0.0) + increment
+        by_bucket[bucket] = bucket_total
+        previous_totals = current
 
-    by_sleeve: Dict[Sleeve, float] = {"rates": 0.0, "tips": 0.0, "credit": 0.0}
-    for (_bucket, sleeve), value in allocations.items():
-        by_sleeve[sleeve] += value
+    total_allocated = sum(by_bucket.values())
+    if total_allocated <= 0.0:
+        raise ValueError("Optimisation produced zero allocation. Check bucket weights and tenors.")
+
+    # Normalise the outputs so the total sums to one.
+    allocations = {
+        key: value / total_allocated
+        for key, value in allocations.items()
+        if value > _FLOAT_TOLERANCE
+    }
+    by_bucket = {
+        bucket: value / total_allocated
+        for bucket, value in by_bucket.items()
+        if value > _FLOAT_TOLERANCE
+    }
+    by_sleeve = {
+        sleeve: value / total_allocated
+        for sleeve, value in by_sleeve.items()
+        if value > _FLOAT_TOLERANCE
+    }
 
     return RiskOptimizationResult(
         allocations=allocations,
         by_bucket=by_bucket,
         by_sleeve=by_sleeve,
-        K_rates=k_rates,
-        K_tips=k_tips,
-        K_credit=k_credit,
-        portfolio_yield=portfolio_yield,
     )
 
 

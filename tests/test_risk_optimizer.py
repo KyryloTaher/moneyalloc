@@ -2,106 +2,82 @@ import math
 
 import pytest
 
-pytest.importorskip("numpy")
-pytest.importorskip("scipy.optimize")
-
 from moneyalloc_app.risk_optimizer import ProblemSpec, run_risk_equal_optimization
 
 
-def _build_spec(
-    *,
-    bucket_weights,
-    rates=None,
-    tips=None,
-    credit=None,
-    durations=None,
-):
+def _build_spec(bucket_weights, horizons, tenors):
     return ProblemSpec(
         bucket_weights=bucket_weights,
-        rates_yields=rates or {},
-        tips_yields=tips or {},
-        credit_yields=credit or {},
-        durations=durations or {},
+        bucket_horizons=horizons,
+        tenors=tenors,
     )
 
 
-def test_solver_handles_missing_sleeves():
+def test_cascading_allocation_respects_bucket_weights():
     spec = _build_spec(
-        bucket_weights={"USD": 100.0},
-        rates={"USD": 4.0},
-        durations={("USD", "rates"): 5.0},
-    )
-
-    result = run_risk_equal_optimization(spec)
-
-    assert math.isclose(result.by_bucket["USD"], 1.0, rel_tol=1e-9)
-    assert result.by_sleeve["rates"] == pytest.approx(1.0)
-    assert result.by_sleeve["tips"] == pytest.approx(0.0)
-    assert result.by_sleeve["credit"] == pytest.approx(0.0)
-
-
-def test_solver_enforces_equal_risk_for_available_sleeves():
-    spec = _build_spec(
-        bucket_weights={"USD": 100.0},
-        tips={"USD": 3.0},
-        credit={"USD": 6.0},
-        durations={("USD", "tips"): 4.0, ("USD", "credit"): 8.0},
+        bucket_weights={"1Y": 60.0, "3Y": 40.0},
+        horizons={"1Y": 1.0, "3Y": 3.0},
+        tenors={("1Y", "rates"): 0.5, ("3Y", "rates"): 1.5, ("3Y", "credit"): 2.5},
     )
 
     result = run_risk_equal_optimization(spec)
 
-    assert math.isclose(result.by_bucket["USD"], 1.0, rel_tol=1e-9)
-    assert math.isclose(result.K_tips, result.K_credit, rel_tol=1e-9)
+    assert math.isclose(sum(result.by_bucket.values()), 1.0, rel_tol=1e-9)
+    assert math.isclose(result.by_bucket["1Y"], 0.6, rel_tol=1e-9)
+    assert math.isclose(result.by_bucket["3Y"], 0.4, rel_tol=1e-9)
 
 
-def test_equal_risk_still_considers_all_present_sleeves():
+def test_cascading_allocation_is_monotonic():
     spec = _build_spec(
-        bucket_weights={"USD": 60.0, "EUR": 40.0},
-        rates={"USD": 5.0},
-        tips={"USD": 4.0},
-        credit={"EUR": 6.0},
-        durations={
-            ("USD", "rates"): 4.0,
-            ("USD", "tips"): 2.0,
-            ("EUR", "credit"): 2.0,
+        bucket_weights={"6M": 30.0, "1Y": 30.0, "2Y": 40.0},
+        horizons={"6M": 0.5, "1Y": 1.0, "2Y": 2.0},
+        tenors={
+            ("6M", "rates"): 0.25,
+            ("1Y", "rates"): 0.75,
+            ("2Y", "rates"): 1.5,
+            ("2Y", "credit"): 1.8,
         },
     )
 
     result = run_risk_equal_optimization(spec)
 
-    assert math.isclose(result.by_bucket["USD"], 0.6, rel_tol=1e-9)
-    assert math.isclose(result.by_bucket["EUR"], 0.4, rel_tol=1e-9)
-    assert math.isclose(result.K_rates, result.K_tips, rel_tol=1e-9)
-    assert math.isclose(result.K_rates, result.K_credit, rel_tol=1e-9)
+    # Later buckets should never reduce the cumulative share allocated to an existing sleeve.
+    six_month_share = result.allocations.get(("6M", "rates"), 0.0)
+    one_year_increment = result.allocations.get(("1Y", "rates"), 0.0)
+    two_year_increment = result.allocations.get(("2Y", "rates"), 0.0)
+
+    one_year_cumulative = six_month_share + one_year_increment
+    two_year_cumulative = one_year_cumulative + two_year_increment
+
+    assert one_year_cumulative >= six_month_share
+    assert two_year_cumulative >= one_year_cumulative
 
 
-def test_full_flow_preserves_targets_and_balances_risk():
+def test_shorter_tenors_receive_higher_priority():
     spec = _build_spec(
-        bucket_weights={"USD 5Y": 40.0, "USD 10Y": 30.0, "EUR 10Y": 30.0},
-        rates={"USD 5Y": 4.2, "USD 10Y": 4.6, "EUR 10Y": 3.1},
-        tips={"USD 5Y": 3.8},
-        credit={"USD 10Y": 5.4, "EUR 10Y": 5.9},
-        durations={
-            ("USD 5Y", "rates"): 4.0,
-            ("USD 10Y", "rates"): 8.0,
-            ("EUR 10Y", "rates"): 7.5,
-            ("USD 5Y", "tips"): 5.0,
-            ("USD 10Y", "credit"): 6.0,
-            ("EUR 10Y", "credit"): 5.5,
+        bucket_weights={"1Y": 40.0, "3Y": 60.0},
+        horizons={"1Y": 1.0, "3Y": 3.0},
+        tenors={
+            ("1Y", "rates"): 0.5,
+            ("3Y", "rates"): 1.0,
+            ("3Y", "tips"): 2.0,
         },
     )
 
     result = run_risk_equal_optimization(spec)
 
-    # Bucket targets are respected after normalisation to 1.0
-    assert math.isclose(result.by_bucket["USD 5Y"], 0.4, rel_tol=1e-9)
-    assert math.isclose(result.by_bucket["USD 10Y"], 0.3, rel_tol=1e-9)
-    assert math.isclose(result.by_bucket["EUR 10Y"], 0.3, rel_tol=1e-9)
+    # Remaining allocation in the longer bucket should favour the shorter tenor sleeve.
+    long_bucket_rates = result.allocations[("3Y", "rates")]
+    long_bucket_tips = result.allocations.get(("3Y", "tips"), 0.0)
+    assert long_bucket_rates >= long_bucket_tips
 
-    # Equal risk holds for every sleeve that exists in the input data
-    assert math.isclose(result.K_rates, result.K_tips, rel_tol=1e-9)
-    assert math.isclose(result.K_rates, result.K_credit, rel_tol=1e-9)
 
-    # Allocations sum to the full portfolio
-    total_allocated = sum(result.allocations.values())
-    assert math.isclose(total_allocated, 1.0, rel_tol=1e-9)
+def test_missing_horizon_information_is_rejected():
+    spec = _build_spec(
+        bucket_weights={"1Y": 100.0},
+        horizons={},
+        tenors={},
+    )
+
+    with pytest.raises(ValueError):
+        run_risk_equal_optimization(spec)
