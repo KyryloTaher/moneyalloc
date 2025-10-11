@@ -191,9 +191,14 @@ class RiskInputEditor(ttk.LabelFrame):
         for currency, horizons in initial.items():
             for horizon, sleeve_data in horizons.items():
                 for sleeve, selected in sleeve_data.items():
-                    tenor_var = self._vars.get((currency, horizon, sleeve))
-                    if tenor_var:
-                        tenor_var.set(bool(selected))
+                    key = (currency, horizon, sleeve)
+                    tenor_var = self._vars.get(key)
+                    if not tenor_var:
+                        continue
+                    if only_if_empty:
+                        # Avoid clobbering any state the user may have toggled already.
+                        continue
+                    tenor_var.set(bool(selected))
 
     def _get_var(self, currency: str, horizon: str, sleeve: str) -> tk.BooleanVar:
         key = (currency, horizon, sleeve)
