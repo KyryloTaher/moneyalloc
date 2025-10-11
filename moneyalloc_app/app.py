@@ -75,19 +75,19 @@ def horizon_to_years(horizon: str) -> float:
 
 
 class RiskInputEditor(ttk.LabelFrame):
-    """Inline editor that captures risk inputs for required time horizons."""
+    """Inline editor that captures ETF availability for required horizons."""
 
     _SLEEVES: tuple[tuple[str, str], ...] = (
-        ("rates", "Government (DV01) tenor"),
-        ("tips", "Inflation (BE01) tenor"),
-        ("credit", "Credit (CS01) tenor"),
+        ("rates", "Government (DV01) available"),
+        ("tips", "Inflation (BE01) available"),
+        ("credit", "Credit (CS01) available"),
     )
 
     def __init__(self, master: tk.Widget) -> None:
         super().__init__(master, text="Risk inputs", padding=10)
         self._notebook = ttk.Notebook(self)
         self._notebook.pack(fill="both", expand=True)
-        self._vars: dict[tuple[str, str, str], tk.StringVar] = {}
+        self._vars: dict[tuple[str, str, str], tk.BooleanVar] = {}
         self._status_var = tk.StringVar()
         self._status_label = ttk.Label(
             self,
@@ -132,7 +132,7 @@ class RiskInputEditor(ttk.LabelFrame):
     def set_requirements(
         self,
         horizons_by_currency: dict[str, list[str]],
-        initial: Optional[dict[str, dict[str, dict[str, float]]]] = None,
+        initial: Optional[dict[str, dict[str, dict[str, bool]]]] = None,
     ) -> None:
         normalized_horizons = {
             currency: tuple(sorted(dict.fromkeys(horizons)))
@@ -160,25 +160,19 @@ class RiskInputEditor(ttk.LabelFrame):
 
             ttk.Label(frame, text="Time horizon").grid(row=0, column=0, padx=4, pady=4, sticky="w")
             for col, (_sleeve, tenor_label) in enumerate(self._SLEEVES, start=1):
-                ttk.Label(frame, text=f"{tenor_label} (years)").grid(
-                    row=0, column=col, padx=4, pady=4
-                )
+                ttk.Label(frame, text=tenor_label).grid(row=0, column=col, padx=4, pady=4)
 
             for row_index, horizon in enumerate(self._horizons[currency], start=1):
                 ttk.Label(frame, text=horizon).grid(row=row_index, column=0, sticky="w", padx=4, pady=2)
+                initial_sleeves = initial_data.get(currency, {}).get(horizon, {})
                 for col_index, (sleeve, _tenor_label) in enumerate(self._SLEEVES, start=1):
-                    tenor_var = tk.StringVar()
-                    initial_value = (
-                        initial_data.get(currency, {})
-                        .get(horizon, {})
-                        .get(sleeve)
-                    )
-                    if initial_value is not None:
-                        tenor_var.set(f"{initial_value:.4f}")
-                    else:
-                        computed_tenor = horizon_to_years(horizon)
-                        tenor_var.set(f"{computed_tenor:.4f}")
-                    ttk.Entry(frame, textvariable=tenor_var, width=12).grid(
+                    default_selected = True
+                    if initial_sleeves:
+                        stored_value = initial_sleeves.get(sleeve)
+                        if stored_value is not None:
+                            default_selected = bool(stored_value)
+                    tenor_var = tk.BooleanVar(value=default_selected)
+                    ttk.Checkbutton(frame, variable=tenor_var, takefocus=False).grid(
                         row=row_index,
                         column=col_index,
                         padx=4,
@@ -188,62 +182,47 @@ class RiskInputEditor(ttk.LabelFrame):
 
     def _apply_initial_values(
         self,
-        initial: dict[str, dict[str, dict[str, float]]],
+        initial: dict[str, dict[str, dict[str, bool]]],
         *,
         only_if_empty: bool = False,
     ) -> None:
-        """Populate entry fields using previously captured input values."""
+        """Populate checkbox states using previously captured input values."""
 
         for currency, horizons in initial.items():
             for horizon, sleeve_data in horizons.items():
-                for sleeve, tenor_value in sleeve_data.items():
-                    tenor_var = self._vars.get((currency, horizon, sleeve))
-                    if tenor_var and (not only_if_empty or not tenor_var.get().strip()):
-                        tenor_var.set(f"{tenor_value:.4f}")
+                for sleeve, selected in sleeve_data.items():
+                    key = (currency, horizon, sleeve)
+                    tenor_var = self._vars.get(key)
+                    if not tenor_var:
+                        continue
+                    if only_if_empty:
+                        # Avoid clobbering any state the user may have toggled already.
+                        continue
+                    tenor_var.set(bool(selected))
 
-    def _get_var(self, currency: str, horizon: str, sleeve: str) -> tk.StringVar:
+    def _get_var(self, currency: str, horizon: str, sleeve: str) -> tk.BooleanVar:
         key = (currency, horizon, sleeve)
         if key not in self._vars:
-            self._vars[key] = tk.StringVar()
+            self._vars[key] = tk.BooleanVar(value=True)
         return self._vars[key]
 
     def set_status(self, message: str) -> None:
         self._status_var.set(message)
 
-    def collect(self) -> dict[str, dict[str, dict[str, float]]]:
+    def collect(self) -> dict[str, dict[str, dict[str, bool]]]:
         if not self._horizons:
             return {}
-        data: dict[str, dict[str, dict[str, float]]] = {}
+        data: dict[str, dict[str, dict[str, bool]]] = {}
         for currency, horizons in self._horizons.items():
-            currency_data: dict[str, dict[str, float]] = {}
+            currency_data: dict[str, dict[str, bool]] = {}
             for horizon in horizons:
-                horizon_data: dict[str, float] = {}
+                horizon_data: dict[str, bool] = {}
                 for sleeve, _tenor_label in self._SLEEVES:
-                    tenor_text = self._get_var(currency, horizon, sleeve).get().strip()
-                    if not tenor_text:
-                        continue
-                    try:
-                        tenor_value = float(tenor_text)
-                    except ValueError:
-                        message = "Tenors must be numeric values in the risk inputs section."
-                        self.set_status(message)
-                        raise ValueError(message) from None
-                    if tenor_value <= 0:
-                        message = "Tenor values must be positive numbers."
-                        self.set_status(message)
-                        raise ValueError(message)
-                    horizon_data[sleeve] = tenor_value
-                if not horizon_data:
-                    message = "Provide at least one tenor for each time horizon in the risk inputs section."
-                    self.set_status(message)
-                    raise ValueError(message)
+                    selected = bool(self._get_var(currency, horizon, sleeve).get())
+                    horizon_data[sleeve] = selected
                 currency_data[horizon] = horizon_data
             if currency_data:
                 data[currency] = currency_data
-        if not data:
-            message = "Provide at least one tenor to calculate the risk summary."
-            self.set_status(message)
-            raise ValueError(message)
         self._status_var.set("")
         return data
 
@@ -255,9 +234,9 @@ class RiskInputsPanel(ttk.Frame):
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(master, padding=10)
         instructions = (
-            "Provide the market data inputs that will be used when calculating "
-            "distribution recommendations. Values are grouped by currency and "
-            "time horizon."
+            "Select the risk sleeves that are available for each currency and "
+            "time horizon. These choices determine which ETFs can be used when "
+            "building distribution recommendations."
         )
         ttk.Label(self, text=instructions, wraplength=700, justify="left").pack(
             anchor="w"
@@ -265,13 +244,13 @@ class RiskInputsPanel(ttk.Frame):
         self.editor = RiskInputEditor(self)
         self.editor.configure_pack(fill="both", expand=True, pady=(10, 0))
         self.editor.hide()
-        self._latest_inputs: dict[str, dict[str, dict[str, float]]] = {}
+        self._latest_inputs: dict[str, dict[str, dict[str, bool]]] = {}
         self._current_requirements: dict[str, tuple[str, ...]] = {}
 
     def update_requirements(
         self,
         horizons_by_currency: dict[str, list[str]],
-        initial: Optional[dict[str, dict[str, dict[str, float]]]] = None,
+        initial: Optional[dict[str, dict[str, dict[str, bool]]]] = None,
     ) -> None:
         normalized = {
             currency: list(dict.fromkeys(values)) for currency, values in horizons_by_currency.items()
@@ -283,12 +262,12 @@ class RiskInputsPanel(ttk.Frame):
         self.editor.set_requirements(normalized, initial_values)
         self._current_requirements = signature
 
-    def collect_inputs(self) -> dict[str, dict[str, dict[str, float]]]:
+    def collect_inputs(self) -> dict[str, dict[str, dict[str, bool]]]:
         data = self.editor.collect()
         self._latest_inputs = data
         return data
 
-    def get_latest_inputs(self) -> dict[str, dict[str, dict[str, float]]]:
+    def get_latest_inputs(self) -> dict[str, dict[str, dict[str, bool]]]:
         return deepcopy(self._latest_inputs)
 
     def set_status(self, message: str) -> None:
@@ -384,7 +363,7 @@ class AllocationApp(ttk.Frame):
         self.columnconfigure(0, weight=1)
 
         self._create_menu()
-        self._risk_inputs: dict[str, dict[str, dict[str, float]]] = {}
+        self._risk_inputs: dict[str, dict[str, dict[str, bool]]] = {}
         self._risk_requirements: dict[str, list[str]] = {}
 
         self._create_widgets()
@@ -563,9 +542,28 @@ class AllocationApp(ttk.Frame):
         self, required: dict[str, list[str]]
     ) -> dict[str, dict[str, dict[str, float]]]:
         self._ensure_risk_requirements(required)
-        data = self.risk_inputs_panel.collect_inputs()
-        self._risk_inputs = data
-        return data
+        selections = self.risk_inputs_panel.collect_inputs()
+        self._risk_inputs = selections
+        return self._convert_risk_inputs_to_tenors(selections)
+
+    @staticmethod
+    def _convert_risk_inputs_to_tenors(
+        selections: dict[str, dict[str, dict[str, bool]]]
+    ) -> dict[str, dict[str, dict[str, float]]]:
+        converted: dict[str, dict[str, dict[str, float]]] = {}
+        for currency, horizons in selections.items():
+            currency_data: dict[str, dict[str, float]] = {}
+            for horizon, sleeve_data in horizons.items():
+                selected = {
+                    sleeve: horizon_to_years(horizon)
+                    for sleeve, is_available in sleeve_data.items()
+                    if is_available
+                }
+                if selected:
+                    currency_data[horizon] = selected
+            if currency_data:
+                converted[currency] = currency_data
+        return converted
 
     def _refresh_risk_inputs_panel(self) -> None:
         requirements = self._compute_risk_requirements()
@@ -1630,14 +1628,7 @@ class DistributionPanel(ttk.Frame):
 
         for currency in currencies:
             rows = plan_rows_by_currency.get(currency, [])
-            selections = input_results.get(currency)
-            if not selections:
-                inactive_currency_lines[currency] = [
-                    f"Risk summary – {self._display_currency(currency)}:",
-                    "  Skipped: no risk inputs were provided.",
-                ]
-                continue
-
+            selections = input_results.get(currency) or {}
             bucket_totals: dict[str, float] = {}
             for row in rows:
                 if not row.time_horizon:
@@ -1662,6 +1653,22 @@ class DistributionPanel(ttk.Frame):
                     f"Risk summary – {self._display_currency(currency)}:",
                     "  Skipped: no positive allocation weights detected.",
                 ]
+                continue
+
+            missing_buckets = [
+                bucket for bucket in normalized_weights if not selections.get(bucket)
+            ]
+            if missing_buckets:
+                lines = [
+                    f"Risk summary – {self._display_currency(currency)}:",
+                    "  Cannot calculate risk summary: no instruments are available for:",
+                ]
+                for bucket in missing_buckets:
+                    lines.append(f"    - {bucket}")
+                lines.append(
+                    "  Update the risk inputs or adjust the initial allocations to use available instruments."
+                )
+                inactive_currency_lines[currency] = lines
                 continue
 
             bucket_weights_by_currency[currency] = normalized_weights
