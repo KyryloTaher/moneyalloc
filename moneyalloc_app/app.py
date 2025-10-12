@@ -17,6 +17,7 @@ from .models import (
     Distribution,
     DistributionEntry,
     DistributionRiskInput,
+    CASH_TIME_HORIZON_LABEL,
     MAX_TIME_HORIZON_LABEL,
     NONE_TIME_HORIZON_LABEL,
     canonicalize_time_horizon,
@@ -1320,6 +1321,21 @@ class DistributionPanel(ttk.Frame):
         return True
 
     @staticmethod
+    def _non_risk_label(value: Optional[str]) -> str:
+        """Return the display label for a non risk-managed horizon value."""
+
+        if value is None:
+            return CASH_TIME_HORIZON_LABEL
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return CASH_TIME_HORIZON_LABEL
+            if text.lower() == NONE_TIME_HORIZON_LABEL.lower():
+                return NONE_TIME_HORIZON_LABEL
+            return text
+        return CASH_TIME_HORIZON_LABEL
+
+    @staticmethod
     def _format_tenor_years(value: float, bucket: Optional[str] = None) -> str:
         if bucket:
             lowered = bucket.lower()
@@ -1337,13 +1353,9 @@ class DistributionPanel(ttk.Frame):
 
         totals: dict[str, float] = {}
         for row in rows:
-            horizon = row.time_horizon or NONE_TIME_HORIZON_LABEL
             if row.time_horizon and cls._is_risk_horizon(row.time_horizon):
                 continue
-            if isinstance(horizon, str):
-                label = horizon.strip() or NONE_TIME_HORIZON_LABEL
-            else:  # pragma: no cover - defensive
-                label = NONE_TIME_HORIZON_LABEL
+            label = cls._non_risk_label(row.time_horizon)
             totals[label] = totals.get(label, 0.0) + row.target_share
         return totals
 
@@ -1685,7 +1697,7 @@ class DistributionPanel(ttk.Frame):
                         risk_result.fixed_buckets.items(), key=lambda item: (-item[1], item[0])
                     ):
                         amount_value = overall_target_total * share if overall_target_total > 0 else 0.0
-                        label = bucket or NONE_TIME_HORIZON_LABEL
+                        label = self._non_risk_label(bucket)
                         notes = f"Share {share * 100:.2f}% of total plan"
                         tree.insert(
                             fixed_parent,
@@ -1759,7 +1771,7 @@ class DistributionPanel(ttk.Frame):
                     for bucket, bucket_share in sorted(
                         breakdown.items(), key=lambda item: (-item[1], item[0])
                     ):
-                        label = bucket or NONE_TIME_HORIZON_LABEL
+                        label = self._non_risk_label(bucket)
                         lines.append(f"    {label}: {bucket_share:.2f}% of total plan")
                 notes[currency] = lines
             return notes, {}
@@ -2052,7 +2064,7 @@ class DistributionPanel(ttk.Frame):
                 for bucket, share in sorted(
                     fixed_breakdown.items(), key=lambda item: (-item[1], item[0])
                 ):
-                    label = bucket or NONE_TIME_HORIZON_LABEL
+                    label = self._non_risk_label(bucket)
                     lines.append(f"    {label}: {share:.2f}% of total plan")
 
             fixed_share = fixed_share_by_currency.get(currency, 0.0)
