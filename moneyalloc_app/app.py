@@ -17,6 +17,8 @@ from .models import (
     Distribution,
     DistributionEntry,
     DistributionRiskInput,
+    MAX_TIME_HORIZON_LABEL,
+    NONE_TIME_HORIZON_LABEL,
     canonicalize_time_horizon,
 )
 from .sample_data import populate_with_sample_data
@@ -26,7 +28,6 @@ from .risk_optimizer import (
 )
 
 
-MAX_TIME_HORIZON_LABEL = "Max"
 _MAX_HORIZON_YEARS = 100.0
 
 DEFAULT_TIME_HORIZONS: tuple[str, ...] = (
@@ -40,6 +41,7 @@ DEFAULT_TIME_HORIZONS: tuple[str, ...] = (
     "3Y",
     "5Y",
     MAX_TIME_HORIZON_LABEL,
+    NONE_TIME_HORIZON_LABEL,
 )
 ALL_TIME_HORIZONS_OPTION = "All time horizons"
 
@@ -350,6 +352,7 @@ class CurrencyRiskResult:
     by_sleeve: dict[str, float]
     per_bucket_sleeve: dict[str, dict[str, float]]
     currency_share: float
+    fixed_buckets: dict[str, float]
 
 
 def _format_amount(value: float) -> str:
@@ -671,6 +674,8 @@ class AllocationApp(ttk.Frame):
             except ValueError:
                 continue
             if not horizon:
+                continue
+            if horizon.lower() == NONE_TIME_HORIZON_LABEL.lower():
                 continue
             codes = DistributionPanel._parse_currency_codes(allocation.currency)
             for code in codes or ("",):
@@ -1303,19 +1308,44 @@ class DistributionPanel(ttk.Frame):
     def _is_risk_horizon(value: Optional[str]) -> bool:
         if not value:
             return False
+        text = value.strip()
+        if not text:
+            return False
+        if text.lower() == NONE_TIME_HORIZON_LABEL.lower():
+            return False
         try:
-            horizon_to_years(value)
+            horizon_to_years(text)
         except ValueError:
             return False
         return True
 
     @staticmethod
     def _format_tenor_years(value: float, bucket: Optional[str] = None) -> str:
-        if bucket and bucket.lower() == MAX_TIME_HORIZON_LABEL.lower():
-            return MAX_TIME_HORIZON_LABEL
+        if bucket:
+            lowered = bucket.lower()
+            if lowered == MAX_TIME_HORIZON_LABEL.lower():
+                return MAX_TIME_HORIZON_LABEL
+            if lowered == NONE_TIME_HORIZON_LABEL.lower():
+                return NONE_TIME_HORIZON_LABEL
         if math.isclose(value, _MAX_HORIZON_YEARS, rel_tol=1e-9):
             return MAX_TIME_HORIZON_LABEL
         return f"{value:.2f}y"
+
+    @classmethod
+    def _summarize_non_risk_rows(cls, rows: Iterable[PlanRow]) -> dict[str, float]:
+        """Return the total target share for non-risk-managed horizons."""
+
+        totals: dict[str, float] = {}
+        for row in rows:
+            horizon = row.time_horizon or NONE_TIME_HORIZON_LABEL
+            if row.time_horizon and cls._is_risk_horizon(row.time_horizon):
+                continue
+            if isinstance(horizon, str):
+                label = horizon.strip() or NONE_TIME_HORIZON_LABEL
+            else:  # pragma: no cover - defensive
+                label = NONE_TIME_HORIZON_LABEL
+            totals[label] = totals.get(label, 0.0) + row.target_share
+        return totals
 
     def _clear_plan_views(self) -> None:
         for child in list(self.plan_notebook.winfo_children()):
@@ -1599,6 +1629,7 @@ class DistributionPanel(ttk.Frame):
         }
 
         overall_invest_total = max(self.totals.get("invest_total", 0.0), 0.0)
+        overall_target_total = self.totals.get("target_total", 0.0)
 
         for currency in sorted(self.plan_rows_by_currency):
             tree = self._ensure_currency_tree(currency)
@@ -1641,6 +1672,30 @@ class DistributionPanel(ttk.Frame):
                                 notes_text,
                             ),
                         )
+                if risk_result.fixed_buckets:
+                    fixed_parent = f"fixed::{currency}"
+                    tree.insert(
+                        "",
+                        "end",
+                        iid=fixed_parent,
+                        text="Outside risk optimisation",
+                        values=("", "Fixed allocation summary"),
+                    )
+                    for bucket, share in sorted(
+                        risk_result.fixed_buckets.items(), key=lambda item: (-item[1], item[0])
+                    ):
+                        amount_value = overall_target_total * share if overall_target_total > 0 else 0.0
+                        label = bucket or NONE_TIME_HORIZON_LABEL
+                        notes = f"Share {share * 100:.2f}% of total plan"
+                        tree.insert(
+                            fixed_parent,
+                            "end",
+                            text=label,
+                            values=(
+                                _format_amount(amount_value),
+                                notes,
+                            ),
+                        )
             else:
                 for row in rows:
                     notes = (
@@ -1669,6 +1724,7 @@ class DistributionPanel(ttk.Frame):
     ) -> tuple[dict[str, list[str]], dict[str, CurrencyRiskResult]]:
         horizon_map: dict[str, list[str]] = {}
         fixed_share_by_currency: dict[str, float] = {}
+        fixed_bucket_breakdown: dict[str, dict[str, float]] = {}
         for currency, rows in plan_rows_by_currency.items():
             horizons = sorted(
                 {
@@ -1679,13 +1735,11 @@ class DistributionPanel(ttk.Frame):
             )
             if horizons:
                 horizon_map[currency] = horizons
-            fixed_share = sum(
-                row.target_share
-                for row in rows
-                if row.time_horizon and not self._is_risk_horizon(row.time_horizon)
-            )
-            if fixed_share:
+            fixed_totals = self._summarize_non_risk_rows(rows)
+            if fixed_totals:
+                fixed_share = sum(fixed_totals.values())
                 fixed_share_by_currency[currency] = fixed_share
+                fixed_bucket_breakdown[currency] = fixed_totals
         if not horizon_map:
             self.report_risk_requirements({})
             self._active_risk_inputs = {}
@@ -1699,6 +1753,14 @@ class DistributionPanel(ttk.Frame):
                     "  No risk-managed horizons detected.",
                     f"  {share:.2f}% of the allocation remains unchanged.",
                 ]
+                breakdown = fixed_bucket_breakdown.get(currency, {})
+                if breakdown:
+                    lines.append("  Fixed allocation breakdown:")
+                    for bucket, bucket_share in sorted(
+                        breakdown.items(), key=lambda item: (-item[1], item[0])
+                    ):
+                        label = bucket or NONE_TIME_HORIZON_LABEL
+                        lines.append(f"    {label}: {bucket_share:.2f}% of total plan")
                 notes[currency] = lines
             return notes, {}
 
@@ -1859,6 +1921,7 @@ class DistributionPanel(ttk.Frame):
                     by_sleeve={"rates": 0.0, "tips": 0.0, "credit": 0.0},
                     per_bucket_sleeve={},
                     currency_share=0.0,
+                    fixed_buckets={},
                 )
                 results_map[currency] = entry
             return entry
@@ -1876,6 +1939,16 @@ class DistributionPanel(ttk.Frame):
             entry.by_sleeve[sleeve] = entry.by_sleeve.get(sleeve, 0.0) + value
             bucket_map = entry.per_bucket_sleeve.setdefault(bucket, {})
             bucket_map[sleeve] = bucket_map.get(sleeve, 0.0) + value
+
+        for currency, buckets in fixed_bucket_breakdown.items():
+            entry = results_map.get(currency)
+            if entry is None:
+                continue
+            entry.fixed_buckets = {
+                bucket: share / 100.0
+                for bucket, share in buckets.items()
+                if share > 0.0
+            }
 
         lines_map: dict[str, list[str]] = dict(inactive_currency_lines)
 
@@ -1972,6 +2045,15 @@ class DistributionPanel(ttk.Frame):
                 if total <= 0:
                     continue
                 lines.append(f"    {sleeve.capitalize()}: {total * 100:.2f}%")
+
+            fixed_breakdown = fixed_bucket_breakdown.get(currency, {})
+            if fixed_breakdown:
+                lines.append("  Outside risk optimisation:")
+                for bucket, share in sorted(
+                    fixed_breakdown.items(), key=lambda item: (-item[1], item[0])
+                ):
+                    label = bucket or NONE_TIME_HORIZON_LABEL
+                    lines.append(f"    {label}: {share:.2f}% of total plan")
 
             fixed_share = fixed_share_by_currency.get(currency, 0.0)
             if fixed_share > 0:

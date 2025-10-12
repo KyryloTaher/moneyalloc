@@ -30,6 +30,7 @@ _CANONICAL_HORIZON_PATTERN = re.compile(r"^(\d+)\s*([ymwd])$", re.IGNORECASE)
 _TEXTUAL_HORIZON_PATTERN = re.compile(r"^(\d+)\s*([a-z]+)$", re.IGNORECASE)
 
 MAX_TIME_HORIZON_LABEL = "Max"
+NONE_TIME_HORIZON_LABEL = "None"
 
 
 def canonicalize_time_horizon(value: Optional[str]) -> Optional[str]:
@@ -50,8 +51,11 @@ def canonicalize_time_horizon(value: Optional[str]) -> Optional[str]:
     if not text:
         return None
 
-    if text.lower() == MAX_TIME_HORIZON_LABEL.lower():
+    lowered = text.lower()
+    if lowered == MAX_TIME_HORIZON_LABEL.lower():
         return MAX_TIME_HORIZON_LABEL
+    if lowered == NONE_TIME_HORIZON_LABEL.lower():
+        return NONE_TIME_HORIZON_LABEL
 
     canonical_match = _CANONICAL_HORIZON_PATTERN.fullmatch(text)
     if canonical_match:
@@ -167,4 +171,6 @@ __all__ = [
     "DistributionRiskInput",
     "canonicalize_time_horizon",
     "display_time_horizon",
+    "MAX_TIME_HORIZON_LABEL",
+    "NONE_TIME_HORIZON_LABEL",
 ]

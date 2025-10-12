@@ -5,8 +5,8 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from moneyalloc_app.app import DistributionDialog
-from moneyalloc_app.models import Allocation
+from moneyalloc_app.app import DistributionDialog, PlanRow
+from moneyalloc_app.models import Allocation, NONE_TIME_HORIZON_LABEL
 
 
 class StubAllocationRepo:
@@ -75,3 +75,51 @@ def test_multi_currency_allocation_filters_and_totals():
     assert len(plan_rows_usd) == 1
     assert plan_rows_usd[0].currencies == ("USD",)
     assert set(currency_totals_usd.keys()) == {"USD"}
+
+
+def test_non_risk_horizons_grouped_under_none_label():
+    rows = [
+        PlanRow(
+            allocation_id=1,
+            path="A",
+            currencies=("USD",),
+            time_horizon=None,
+            target_share=10.0,
+            current_value=0.0,
+            current_share=0.0,
+            target_value=0.0,
+            recommended_change=0.0,
+            share_diff=0.0,
+            action="",
+        ),
+        PlanRow(
+            allocation_id=2,
+            path="B",
+            currencies=("USD",),
+            time_horizon=NONE_TIME_HORIZON_LABEL,
+            target_share=15.0,
+            current_value=0.0,
+            current_share=0.0,
+            target_value=0.0,
+            recommended_change=0.0,
+            share_diff=0.0,
+            action="",
+        ),
+        PlanRow(
+            allocation_id=3,
+            path="C",
+            currencies=("USD",),
+            time_horizon="1Y",
+            target_share=75.0,
+            current_value=0.0,
+            current_share=0.0,
+            target_value=0.0,
+            recommended_change=0.0,
+            share_diff=0.0,
+            action="",
+        ),
+    ]
+
+    totals = DistributionDialog._summarize_non_risk_rows(rows)
+
+    assert totals == {NONE_TIME_HORIZON_LABEL: 25.0}
