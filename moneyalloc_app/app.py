@@ -253,8 +253,7 @@ class RiskInputEditor(ttk.LabelFrame):
                 for sleeve, _tenor_label in self._SLEEVES:
                     selected = bool(self._get_var(currency, horizon, sleeve).get())
                     tenor_text = self._get_tenor_var(currency, horizon, sleeve).get().strip()
-                    if selected or tenor_text:
-                        horizon_data[sleeve] = {"selected": selected, "tenors": tenor_text}
+                    horizon_data[sleeve] = {"selected": selected, "tenors": tenor_text}
                 if horizon_data:
                     currency_data[horizon] = horizon_data
             if currency_data:
