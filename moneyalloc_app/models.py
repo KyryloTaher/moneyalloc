@@ -29,6 +29,8 @@ _TIME_HORIZON_ALIASES: dict[str, str] = {
 _CANONICAL_HORIZON_PATTERN = re.compile(r"^(\d+)\s*([ymwd])$", re.IGNORECASE)
 _TEXTUAL_HORIZON_PATTERN = re.compile(r"^(\d+)\s*([a-z]+)$", re.IGNORECASE)
 
+MAX_TIME_HORIZON_LABEL = "Max"
+
 
 def canonicalize_time_horizon(value: Optional[str]) -> Optional[str]:
     """Return the canonical representation of a time horizon.
@@ -47,6 +49,9 @@ def canonicalize_time_horizon(value: Optional[str]) -> Optional[str]:
     text = value.strip()
     if not text:
         return None
+
+    if text.lower() == MAX_TIME_HORIZON_LABEL.lower():
+        return MAX_TIME_HORIZON_LABEL
 
     canonical_match = _CANONICAL_HORIZON_PATTERN.fullmatch(text)
     if canonical_match:
