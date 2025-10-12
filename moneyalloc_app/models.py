@@ -30,7 +30,8 @@ _CANONICAL_HORIZON_PATTERN = re.compile(r"^(\d+)\s*([ymwd])$", re.IGNORECASE)
 _TEXTUAL_HORIZON_PATTERN = re.compile(r"^(\d+)\s*([a-z]+)$", re.IGNORECASE)
 
 MAX_TIME_HORIZON_LABEL = "Max"
-NONE_TIME_HORIZON_LABEL = "None"
+CASH_TIME_HORIZON_LABEL = "Cash"
+NONE_TIME_HORIZON_LABEL = "Cash-like"
 
 
 def canonicalize_time_horizon(value: Optional[str]) -> Optional[str]:

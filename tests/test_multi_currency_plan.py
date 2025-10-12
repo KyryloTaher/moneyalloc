@@ -6,7 +6,11 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from moneyalloc_app.app import DistributionDialog, PlanRow
-from moneyalloc_app.models import Allocation, NONE_TIME_HORIZON_LABEL
+from moneyalloc_app.models import (
+    Allocation,
+    CASH_TIME_HORIZON_LABEL,
+    NONE_TIME_HORIZON_LABEL,
+)
 
 
 class StubAllocationRepo:
@@ -122,4 +126,7 @@ def test_non_risk_horizons_grouped_under_none_label():
 
     totals = DistributionDialog._summarize_non_risk_rows(rows)
 
-    assert totals == {NONE_TIME_HORIZON_LABEL: 25.0}
+    assert totals == {
+        CASH_TIME_HORIZON_LABEL: 10.0,
+        NONE_TIME_HORIZON_LABEL: 15.0,
+    }
