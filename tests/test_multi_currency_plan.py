@@ -6,7 +6,11 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from moneyalloc_app.app import DistributionDialog, PlanRow
-from moneyalloc_app.models import Allocation, NONE_TIME_HORIZON_LABEL
+from moneyalloc_app.models import (
+    Allocation,
+    CASH_TIME_HORIZON_LABEL,
+    NONE_TIME_HORIZON_LABEL,
+)
 
 
 class StubAllocationRepo:
@@ -49,6 +53,8 @@ def test_multi_currency_allocation_filters_and_totals():
     )
 
     harness = PlanBuilderHarness([allocation])
+
+    assert allocation.normalized_time_horizon == CASH_TIME_HORIZON_LABEL
 
     plan_rows, _totals, currency_totals = harness.build_plan(
         amount=0.0, tolerance=0.0, time_horizon=None, currency_filter=None
@@ -122,4 +128,7 @@ def test_non_risk_horizons_grouped_under_none_label():
 
     totals = DistributionDialog._summarize_non_risk_rows(rows)
 
-    assert totals == {NONE_TIME_HORIZON_LABEL: 25.0}
+    assert totals == {
+        CASH_TIME_HORIZON_LABEL: 10.0,
+        NONE_TIME_HORIZON_LABEL: 15.0,
+    }
