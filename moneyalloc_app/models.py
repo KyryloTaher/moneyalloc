@@ -53,6 +53,8 @@ def canonicalize_time_horizon(value: Optional[str]) -> Optional[str]:
         return None
 
     lowered = text.lower()
+    if lowered == CASH_TIME_HORIZON_LABEL.lower():
+        return CASH_TIME_HORIZON_LABEL
     if lowered == MAX_TIME_HORIZON_LABEL.lower():
         return MAX_TIME_HORIZON_LABEL
     if lowered == NONE_TIME_HORIZON_LABEL.lower():
@@ -83,12 +85,15 @@ def display_time_horizon(value: Optional[str]) -> str:
     """Return a display-friendly time horizon string."""
 
     if value is None:
-        return ""
+        return CASH_TIME_HORIZON_LABEL
+    text = value.strip()
+    if not text:
+        return CASH_TIME_HORIZON_LABEL
     try:
         canonical = canonicalize_time_horizon(value)
     except ValueError:
-        return value.strip()
-    return canonical or ""
+        return text
+    return canonical or CASH_TIME_HORIZON_LABEL
 
 
 @dataclass(slots=True)
@@ -173,5 +178,6 @@ __all__ = [
     "canonicalize_time_horizon",
     "display_time_horizon",
     "MAX_TIME_HORIZON_LABEL",
+    "CASH_TIME_HORIZON_LABEL",
     "NONE_TIME_HORIZON_LABEL",
 ]

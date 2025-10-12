@@ -21,6 +21,7 @@ from .models import (
     MAX_TIME_HORIZON_LABEL,
     NONE_TIME_HORIZON_LABEL,
     canonicalize_time_horizon,
+    display_time_horizon,
 )
 from .sample_data import populate_with_sample_data
 from .risk_optimizer import (
@@ -42,6 +43,7 @@ DEFAULT_TIME_HORIZONS: tuple[str, ...] = (
     "3Y",
     "5Y",
     MAX_TIME_HORIZON_LABEL,
+    CASH_TIME_HORIZON_LABEL,
     NONE_TIME_HORIZON_LABEL,
 )
 ALL_TIME_HORIZONS_OPTION = "All time horizons"
@@ -676,7 +678,10 @@ class AllocationApp(ttk.Frame):
                 continue
             if not horizon:
                 continue
-            if horizon.lower() == NONE_TIME_HORIZON_LABEL.lower():
+            if horizon.lower() in {
+                NONE_TIME_HORIZON_LABEL.lower(),
+                CASH_TIME_HORIZON_LABEL.lower(),
+            }:
                 continue
             codes = DistributionPanel._parse_currency_codes(allocation.currency)
             for code in codes or ("",):
@@ -906,7 +911,7 @@ class AllocationApp(ttk.Frame):
             horizon = canonicalize_time_horizon(raw_horizon)
         except ValueError:
             horizon = raw_horizon.strip() or None
-        self.horizon_var.set(horizon or "")
+        self.horizon_var.set(display_time_horizon(horizon))
         include = bool(self.include_var.get())
 
         if self.mode == "add":

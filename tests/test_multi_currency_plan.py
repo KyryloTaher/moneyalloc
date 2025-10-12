@@ -54,6 +54,8 @@ def test_multi_currency_allocation_filters_and_totals():
 
     harness = PlanBuilderHarness([allocation])
 
+    assert allocation.normalized_time_horizon == CASH_TIME_HORIZON_LABEL
+
     plan_rows, _totals, currency_totals = harness.build_plan(
         amount=0.0, tolerance=0.0, time_horizon=None, currency_filter=None
     )
