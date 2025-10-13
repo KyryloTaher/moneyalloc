@@ -324,6 +324,22 @@ class TreeNode:
 
 
 @dataclass(slots=True)
+class RiskInputResult:
+    """Container for processed risk input values."""
+
+    tenors: dict[str, dict[str, dict[str, float]]]
+    tenor_labels: dict[tuple[str, str, str], tuple[str, ...]]
+
+
+@dataclass(slots=True)
+class RiskSelectionDetail:
+    """Describes a selected sleeve and the provided tenor labels."""
+
+    tenor_labels: tuple[str, ...]
+    effective_tenor: float
+
+
+@dataclass(slots=True)
 class PlanRow:
     """Represents a single recommendation entry in the allocation plan."""
 
@@ -583,23 +599,27 @@ class AllocationApp(ttk.Frame):
 
     def _collect_risk_inputs(
         self, required: dict[str, list[str]]
-    ) -> dict[str, dict[str, dict[str, float]]]:
+    ) -> RiskInputResult:
         self._ensure_risk_requirements(required)
         selections = self.risk_inputs_panel.collect_inputs()
         self._risk_inputs = selections
         try:
-            result = self._convert_risk_inputs_to_tenors(selections)
+            tenors, labels = self._convert_risk_inputs_to_tenors(selections)
         except ValueError as exc:
             self.risk_inputs_panel.set_status(str(exc))
             raise
         self.risk_inputs_panel.set_status("")
-        return result
+        return RiskInputResult(tenors=tenors, tenor_labels=labels)
 
     @staticmethod
     def _convert_risk_inputs_to_tenors(
         selections: dict[str, dict[str, dict[str, dict[str, object]]]]
-    ) -> dict[str, dict[str, dict[str, float]]]:
+    ) -> tuple[
+        dict[str, dict[str, dict[str, float]]],
+        dict[tuple[str, str, str], tuple[str, ...]],
+    ]:
         converted: dict[str, dict[str, dict[str, float]]] = {}
+        labels: dict[tuple[str, str, str], tuple[str, ...]] = {}
         for currency, horizons in selections.items():
             currency_data: dict[str, dict[str, float]] = {}
             for horizon, sleeve_data in horizons.items():
@@ -619,7 +639,10 @@ class AllocationApp(ttk.Frame):
                         label = AllocationApp._format_risk_context(currency, horizon, sleeve)
                         raise ValueError(f"{label}: {exc}") from exc
                     if tenors:
-                        tenor_value = min(tenors)
+                        tenor_value = min(value for value, _ in tenors)
+                        labels[(currency, horizon, sleeve)] = tuple(
+                            canonical for _, canonical in tenors
+                        )
                     else:
                         try:
                             tenor_value = horizon_to_years(horizon)
@@ -629,16 +652,17 @@ class AllocationApp(ttk.Frame):
                                 f"{label}: Unable to infer tenor from the time horizon. "
                                 "Enter at least one tenor using formats such as 1D, 2W, 6M or 3Y."
                             ) from exc
+                        labels[(currency, horizon, sleeve)] = ()
                     horizon_values[sleeve] = tenor_value
                 if horizon_values:
                     currency_data[horizon] = horizon_values
             if currency_data:
                 converted[currency] = currency_data
-        return converted
+        return converted, labels
 
     @staticmethod
-    def _parse_tenor_values(text: str) -> list[float]:
-        values: list[float] = []
+    def _parse_tenor_values(text: str) -> list[tuple[float, str]]:
+        values: list[tuple[float, str]] = []
         if not text:
             return values
         parts = [part.strip() for part in text.split(",")]
@@ -651,7 +675,7 @@ class AllocationApp(ttk.Frame):
                 raise ValueError(
                     "Tenors must be expressed as positive integers followed by Y, M, W or D."
                 ) from exc
-            values.append(horizon_to_years(canonical))
+            values.append((horizon_to_years(canonical), canonical))
         return values
 
     @staticmethod
@@ -1185,7 +1209,7 @@ class DistributionPanel(ttk.Frame):
         repo: AllocationRepository,
         on_saved: Callable[[str, int], None],
         *,
-        get_risk_inputs: Callable[[dict[str, list[str]]], dict[str, dict[str, dict[str, float]]]],
+        get_risk_inputs: Callable[[dict[str, list[str]]], RiskInputResult],
         report_risk_requirements: Callable[[dict[str, list[str]]], None],
     ) -> None:
         super().__init__(master, padding=10)
@@ -1203,7 +1227,7 @@ class DistributionPanel(ttk.Frame):
             "divest_total": 0.0,
         }
         self.selected_currencies: Optional[list[str]] = None
-        self._risk_selection_details: dict[tuple[str, str, str], Optional[float]] = {}
+        self._risk_selection_details: dict[tuple[str, str, str], RiskSelectionDetail] = {}
         self.risk_summary_lines: dict[str, list[str]] = {}
         self.risk_results: dict[str, CurrencyRiskResult] = {}
         self.currency_trees: dict[str, ttk.Treeview] = {}
@@ -1676,9 +1700,13 @@ class DistributionPanel(ttk.Frame):
                         selection = self._risk_selection_details.get((currency, bucket, sleeve))
                         notes = [f"Share {allocation_share * 100:.2f}% of total"]
                         if selection is not None:
-                            notes.append(
-                                f"Tenor {self._format_tenor_years(selection, bucket)}"
-                            )
+                            if selection.tenor_labels:
+                                labels_text = ", ".join(selection.tenor_labels)
+                                notes.append(f"Tenors {labels_text}")
+                            else:
+                                notes.append(
+                                    f"Tenor {self._format_tenor_years(selection.effective_tenor, bucket)}"
+                                )
                         notes_text = " | ".join(notes)
                         tree.insert(
                             bucket_id,
@@ -1786,7 +1814,7 @@ class DistributionPanel(ttk.Frame):
             currency: list(horizons) for currency, horizons in horizon_map.items()
         }
         try:
-            input_results = self.get_risk_inputs(horizon_map)
+            input_result = self.get_risk_inputs(horizon_map)
         except ValueError as exc:
             message = str(exc)
             self._active_risk_inputs = {}
@@ -1799,7 +1827,9 @@ class DistributionPanel(ttk.Frame):
             }
             return notice, {}
 
-        self._active_risk_inputs = input_results
+        effective_inputs = input_result.tenors
+        label_lookup = input_result.tenor_labels
+        self._active_risk_inputs = effective_inputs
 
         def make_bucket_key(currency: str, bucket: str) -> str:
             prefix = currency or "__"
@@ -1835,7 +1865,7 @@ class DistributionPanel(ttk.Frame):
 
         for currency in currencies:
             rows = plan_rows_by_currency.get(currency, [])
-            selections = input_results.get(currency) or {}
+            selections = effective_inputs.get(currency) or {}
             bucket_totals: dict[str, float] = {}
             for row in rows:
                 if not row.time_horizon or not self._is_risk_horizon(row.time_horizon):
@@ -1896,7 +1926,11 @@ class DistributionPanel(ttk.Frame):
                     else:
                         tenor = bucket_duration
                     tenors[(combined_key, sleeve)] = tenor
-                    self._risk_selection_details[(currency, bucket, sleeve)] = tenor
+                    labels = label_lookup.get((currency, bucket, sleeve), ())
+                    self._risk_selection_details[(currency, bucket, sleeve)] = RiskSelectionDetail(
+                        tenor_labels=labels,
+                        effective_tenor=tenor,
+                    )
 
         if not bucket_weights_by_currency:
             return inactive_currency_lines, {}
@@ -2006,7 +2040,7 @@ class DistributionPanel(ttk.Frame):
             entry = results_map.get(currency)
             if not entry or math.isclose(entry.currency_share, 0.0, abs_tol=1e-9):
                 continue
-            selections = input_results.get(currency, {})
+            selections = effective_inputs.get(currency, {})
             lines = [
                 f"Risk summary – {self._display_currency(currency)}:",
                 f"  Target share: {entry.currency_share * 100:.2f}% of investable funds",
@@ -2028,13 +2062,18 @@ class DistributionPanel(ttk.Frame):
                     continue
                 bucket_duration = horizon_to_years(bucket)
                 for sleeve, tenor_value in selections[bucket].items():
-                    if tenor_value is not None and tenor_value > 0:
-                        tenor_display = float(tenor_value)
-                    else:
-                        tenor_display = bucket_duration
+                    detail = self._risk_selection_details.get((currency, bucket, sleeve))
                     label = sleeve_labels.get(sleeve, sleeve.capitalize())
-                    tenor_label = self._format_tenor_years(tenor_display, bucket)
-                    lines.append(f"    {bucket}: {label} | Tenor {tenor_label}")
+                    if detail and detail.tenor_labels:
+                        tenor_label = ", ".join(detail.tenor_labels)
+                        lines.append(f"    {bucket}: {label} | Tenors {tenor_label}")
+                    else:
+                        if tenor_value is not None and tenor_value > 0:
+                            tenor_display = float(tenor_value)
+                        else:
+                            tenor_display = bucket_duration
+                        tenor_label = self._format_tenor_years(tenor_display, bucket)
+                        lines.append(f"    {bucket}: {label} | Tenor {tenor_label}")
 
             if entry.per_bucket_sleeve:
                 lines.append("  Sleeve distribution by tenor:")
@@ -2301,12 +2340,12 @@ class DistributionPanel(ttk.Frame):
             return
 
         try:
-            risk_inputs = self.get_risk_inputs(self._latest_horizon_requirements)
+            risk_inputs_result = self.get_risk_inputs(self._latest_horizon_requirements)
         except ValueError as exc:
             messagebox.showerror("Invalid risk inputs", str(exc), parent=self)
             return
 
-        self._active_risk_inputs = risk_inputs
+        self._active_risk_inputs = risk_inputs_result.tenors
 
         distribution = Distribution(
             id=None,
@@ -2334,7 +2373,7 @@ class DistributionPanel(ttk.Frame):
         ]
 
         risk_records = []
-        for currency, horizons in risk_inputs.items():
+        for currency, horizons in risk_inputs_result.tenors.items():
             for horizon, sleeve_data in horizons.items():
                 for sleeve, tenor_value in sleeve_data.items():
                     risk_records.append(
