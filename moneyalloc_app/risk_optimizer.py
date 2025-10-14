@@ -16,6 +16,7 @@ class ProblemSpec:
     bucket_weights: Dict[Bucket, float]
     bucket_horizons: Dict[Bucket, float]
     tenors: Dict[Tuple[Bucket, Sleeve], float]
+    bucket_currencies: Dict[Bucket, str]
 
 
 @dataclass(slots=True)
@@ -65,29 +66,21 @@ def _tenors_for_bucket(
     """Return sleeves available for the provided bucket."""
 
     bucket_horizon = horizons[bucket]
-    available: Dict[Sleeve, float] = {}
+    available: Dict[Sleeve, float] = dict(previous)
 
     for (source_bucket, sleeve), tenor in tenors.items():
+        if source_bucket != bucket:
+            continue
         if tenor is None:
             continue
         tenor_value = float(tenor)
         if tenor_value <= 0.0:
             continue
-        source_horizon = horizons.get(source_bucket)
-        if source_horizon is None:
-            continue
-        if source_horizon - bucket_horizon > _FLOAT_TOLERANCE:
-            continue
         if tenor_value - bucket_horizon > _FLOAT_TOLERANCE:
-            continue
-        existing = available.get(sleeve)
-        if existing is None or tenor_value < existing:
-            available[sleeve] = tenor_value
-
-    # Ensure sleeves from previous stages remain available even if no new
-    # tenor is supplied for the current bucket.
-    for sleeve, tenor in previous.items():
-        available.setdefault(sleeve, tenor)
+            raise ValueError(
+                f"Tenor {tenor_value} exceeds horizon {bucket_horizon} for bucket {bucket}."
+            )
+        available[sleeve] = tenor_value
 
     if not available:
         raise ValueError(f"No sleeves with tenor <= horizon found for bucket {bucket}.")
@@ -95,50 +88,95 @@ def _tenors_for_bucket(
     return available
 
 
-def _distribute_remaining(
-    allocations: Dict[Sleeve, float],
-    remaining: float,
-    sleeves: Dict[Sleeve, float],
-) -> None:
-    """Distribute the remaining allocation using inverse-tenor weights."""
+def _solve_linear_constraints(
+    matrix: list[list[float]],
+    vector: list[float],
+) -> list[float]:
+    """Solve a (possibly underdetermined) linear system in a least-squares sense."""
 
-    if remaining <= _FLOAT_TOLERANCE:
-        return
+    if not matrix:
+        raise ValueError("No equations provided for optimisation.")
 
-    inverse_weights = {sleeve: 1.0 / tenor for sleeve, tenor in sleeves.items() if tenor > 0.0}
-    weight_total = sum(inverse_weights.values())
-    if weight_total <= 0.0:
-        raise ValueError("Unable to determine sleeve weights for optimisation.")
+    num_rows = len(matrix)
+    num_cols = len(matrix[0]) if matrix else 0
+    if any(len(row) != num_cols for row in matrix):
+        raise ValueError("Inconsistent matrix column sizes supplied to solver.")
 
-    running_total = 0.0
-    ordered = sorted(sleeves.items(), key=lambda item: (item[1], item[0]))
-    for sleeve, tenor in ordered[:-1]:
-        share = inverse_weights[sleeve] / weight_total
-        addition = remaining * share
-        allocations[sleeve] = allocations.get(sleeve, 0.0) + addition
-        running_total += addition
+    def _solve_square(system: list[list[float]], targets: list[float]) -> list[float]:
+        size = len(system)
+        augmented = [list(map(float, system[i])) + [float(targets[i])] for i in range(size)]
+        tolerance = 1e-12
 
-    # Assign any residual amount to the sleeve with the lowest tenor to keep
-    # totals consistent and bias towards lower duration risk.
-    last_sleeve = ordered[-1][0]
-    residual = remaining - running_total
-    allocations[last_sleeve] = allocations.get(last_sleeve, 0.0) + residual
+        for column in range(size):
+            pivot_row = max(
+                range(column, size),
+                key=lambda candidate: abs(augmented[candidate][column]),
+            )
+            pivot_value = augmented[pivot_row][column]
+            if abs(pivot_value) <= tolerance:
+                raise ValueError("Unable to solve optimisation system.")
+            if pivot_row != column:
+                augmented[column], augmented[pivot_row] = augmented[pivot_row], augmented[column]
+
+            pivot = augmented[column][column]
+            for idx in range(column, size + 1):
+                augmented[column][idx] /= pivot
+
+            for row_index in range(size):
+                if row_index == column:
+                    continue
+                factor = augmented[row_index][column]
+                if abs(factor) <= tolerance:
+                    continue
+                for idx in range(column, size + 1):
+                    augmented[row_index][idx] -= factor * augmented[column][idx]
+
+        return [augmented[i][size] for i in range(size)]
+
+    if num_rows >= num_cols:
+        normal_matrix = [[0.0 for _ in range(num_cols)] for _ in range(num_cols)]
+        normal_vector = [0.0 for _ in range(num_cols)]
+
+        for row, target in zip(matrix, vector):
+            for i in range(num_cols):
+                coefficient_i = row[i]
+                if coefficient_i == 0.0:
+                    continue
+                normal_vector[i] += coefficient_i * target
+                for j in range(num_cols):
+                    coefficient_j = row[j]
+                    if coefficient_j == 0.0:
+                        continue
+                    normal_matrix[i][j] += coefficient_i * coefficient_j
+
+        solution = _solve_square(normal_matrix, normal_vector)
+    else:
+        row_matrix = [[0.0 for _ in range(num_rows)] for _ in range(num_rows)]
+        for i in range(num_rows):
+            for j in range(num_rows):
+                row_matrix[i][j] = sum(matrix[i][k] * matrix[j][k] for k in range(num_cols))
+
+        row_solution = _solve_square(row_matrix, [float(value) for value in vector])
+
+        solution = [0.0 for _ in range(num_cols)]
+        for col in range(num_cols):
+            solution[col] = sum(matrix[row][col] * row_solution[row] for row in range(num_rows))
+
+    return solution
 
 
 def run_risk_equal_optimization(spec: ProblemSpec) -> RiskOptimizationResult:
-    """Optimise allocations using a cascading risk-aware algorithm."""
+    """Optimise allocations subject to risk and currency balancing constraints."""
+
+    import math
 
     normalised = _normalise_weights(spec.bucket_weights)
     ordered_buckets = tuple(_sorted_buckets(normalised, spec.bucket_horizons))
-
-    cumulative_targets: Dict[Bucket, float] = {}
-    running_total = 0.0
-    for bucket in ordered_buckets:
-        running_total += normalised[bucket]
-        cumulative_targets[bucket] = running_total
+    if not ordered_buckets:
+        raise ValueError("No buckets supplied for optimisation.")
 
     previous_sleeves: Dict[Sleeve, float] = {}
-    cumulative_allocations: Dict[Bucket, Dict[Sleeve, float]] = {}
+    bucket_sleeve_tenors: Dict[Bucket, Dict[Sleeve, float]] = {}
 
     for bucket in ordered_buckets:
         sleeves = _tenors_for_bucket(
@@ -147,62 +185,150 @@ def run_risk_equal_optimization(spec: ProblemSpec) -> RiskOptimizationResult:
             tenors=spec.tenors,
             previous=previous_sleeves,
         )
-        target_total = cumulative_targets[bucket]
-        allocations = {sleeve: previous_sleeves.get(sleeve, 0.0) for sleeve in sleeves}
-        already_assigned = sum(allocations.values())
+        if not sleeves:
+            raise ValueError(f"No sleeves available for bucket {bucket}.")
+        bucket_sleeve_tenors[bucket] = sleeves
+        previous_sleeves = dict(sleeves)
 
-        if already_assigned - target_total > _FLOAT_TOLERANCE:
-            raise ValueError(
-                "Cumulative bucket weights must be non-decreasing with respect to time horizon."
-            )
+    variables: list[tuple[Bucket, Sleeve, float]] = []
+    index_map: Dict[tuple[Bucket, Sleeve], int] = {}
 
-        remaining = target_total - already_assigned
-        _distribute_remaining(allocations, remaining, sleeves)
+    for bucket in ordered_buckets:
+        sleeves = bucket_sleeve_tenors[bucket]
+        for sleeve, tenor in sorted(sleeves.items()):
+            if tenor <= 0.0:
+                raise ValueError(f"Invalid tenor {tenor!r} for bucket {bucket} and sleeve {sleeve}.")
+            index = len(variables)
+            variables.append((bucket, sleeve, float(tenor)))
+            index_map[(bucket, sleeve)] = index
 
-        cumulative_allocations[bucket] = allocations
-        previous_sleeves = dict(allocations)
+    if not variables:
+        raise ValueError("No investable sleeves supplied for optimisation.")
+
+    num_vars = len(variables)
+    rows: list[list[float]] = []
+    rhs: list[float] = []
+
+    # Bucket share constraints: the shares assigned within each bucket must sum
+    # to the bucket weight.
+    for bucket in ordered_buckets:
+        indices = [index_map[(bucket, sleeve)] for sleeve in bucket_sleeve_tenors[bucket]]
+        row = [0.0] * num_vars
+        for index in indices:
+            row[index] = 1.0
+        rows.append(row)
+        rhs.append(normalised[bucket])
+
+    # Risk equalisation: aggregate DV01/BEI01/CS01 exposure (share * tenor)
+    # must match across sleeves that are present.
+    sleeves_present = sorted({sleeve for _bucket, sleeve, _tenor in variables})
+    if len(sleeves_present) > 1:
+        base = sleeves_present[0]
+        for sleeve in sleeves_present[1:]:
+            row = [0.0] * num_vars
+            for index, (_bucket, current_sleeve, tenor) in enumerate(variables):
+                if current_sleeve == sleeve:
+                    row[index] += tenor
+                elif current_sleeve == base:
+                    row[index] -= tenor
+            if any(value != 0.0 for value in row):
+                rows.append(row)
+                rhs.append(0.0)
+
+    # Currency balancing: for a given risk sleeve and tenor, currencies should
+    # carry equal weight.
+    def _tenor_group_key(tenor_value: float) -> float:
+        return round(tenor_value, 9)
+
+    grouped: Dict[tuple[Sleeve, float], Dict[str, list[int]]] = {}
+    for index, (bucket, sleeve, tenor) in enumerate(variables):
+        currency = spec.bucket_currencies.get(bucket, "")
+        key = (sleeve, _tenor_group_key(tenor))
+        currency_map = grouped.setdefault(key, {})
+        currency_map.setdefault(currency, []).append(index)
+
+    for currency_map in grouped.values():
+        if len(currency_map) <= 1:
+            continue
+        currencies = sorted(currency_map)
+        reference = currencies[0]
+        ref_indices = currency_map[reference]
+        if not ref_indices:
+            continue
+        for currency in currencies[1:]:
+            indices = currency_map[currency]
+            if not indices:
+                continue
+            row = [0.0] * num_vars
+            for idx in indices:
+                row[idx] += 1.0
+            for idx in ref_indices:
+                row[idx] -= 1.0
+            if any(value != 0.0 for value in row):
+                rows.append(row)
+                rhs.append(0.0)
+
+    num_equations = len(rows)
+    if num_equations == 0:
+        raise ValueError("No constraints supplied for optimisation.")
+
+    try:
+        solution = _solve_linear_constraints(rows, rhs)
+    except ValueError as exc:
+        raise ValueError("Unable to equalise risk under the supplied constraints.") from exc
+
+    residual_sum = 0.0
+    for row, target in zip(rows, rhs):
+        predicted = sum(value * row[index] for index, value in enumerate(solution))
+        residual = predicted - target
+        residual_sum += residual * residual
+
+    residual_norm = math.sqrt(residual_sum)
+    if residual_norm > 1e-8:
+        raise ValueError("Unable to equalise risk under the supplied constraints.")
+
+    min_value = min(solution)
+    if min_value < -1e-9:
+        raise ValueError("Optimisation produced negative allocations under the constraints supplied.")
+
+    solution = [value if value > 0.0 else 0.0 for value in solution]
+
+    # Verify that the bucket totals still match the targets after clamping.
+    for bucket in ordered_buckets:
+        indices = [index_map[(bucket, sleeve)] for sleeve in bucket_sleeve_tenors[bucket]]
+        bucket_total = sum(solution[index] for index in indices)
+        if not math.isclose(bucket_total, normalised[bucket], rel_tol=1e-9, abs_tol=1e-9):
+            raise ValueError("Unable to satisfy bucket allocation targets while balancing risk.")
+
+    # Confirm risk balancing across sleeves.
+    if len(sleeves_present) > 1:
+        exposure_by_sleeve: Dict[Sleeve, float] = {}
+        for (bucket, sleeve, tenor), value in zip(variables, solution):
+            exposure_by_sleeve[sleeve] = exposure_by_sleeve.get(sleeve, 0.0) + tenor * value
+        exposures = list(exposure_by_sleeve.values())
+        target_exposure = exposures[0]
+        for exposure in exposures[1:]:
+            if not math.isclose(exposure, target_exposure, rel_tol=1e-8, abs_tol=1e-8):
+                raise ValueError("Risk exposures could not be equalised across sleeves.")
 
     allocations: Dict[Tuple[Bucket, Sleeve], float] = {}
     by_bucket: Dict[Bucket, float] = {}
     by_sleeve: Dict[Sleeve, float] = {}
 
-    previous_totals: Dict[Sleeve, float] = {}
-    for bucket in ordered_buckets:
-        current = cumulative_allocations[bucket]
-        bucket_total = 0.0
-        for sleeve, value in current.items():
-            previous_value = previous_totals.get(sleeve, 0.0)
-            increment = value - previous_value
-            if increment < -_FLOAT_TOLERANCE:
-                raise ValueError("Computed negative allocation increment; check inputs for consistency.")
-            if increment < 0.0:
-                increment = 0.0
-            allocations[(bucket, sleeve)] = increment
-            bucket_total += increment
-            by_sleeve[sleeve] = by_sleeve.get(sleeve, 0.0) + increment
-        by_bucket[bucket] = bucket_total
-        previous_totals = current
+    for (bucket, sleeve, _tenor), value in zip(variables, solution):
+        if value <= _FLOAT_TOLERANCE:
+            continue
+        allocations[(bucket, sleeve)] = value
+        by_bucket[bucket] = by_bucket.get(bucket, 0.0) + value
+        by_sleeve[sleeve] = by_sleeve.get(sleeve, 0.0) + value
 
     total_allocated = sum(by_bucket.values())
-    if total_allocated <= 0.0:
+    if total_allocated <= _FLOAT_TOLERANCE:
         raise ValueError("Optimisation produced zero allocation. Check bucket weights and tenors.")
 
-    # Normalise the outputs so the total sums to one.
-    allocations = {
-        key: value / total_allocated
-        for key, value in allocations.items()
-        if value > _FLOAT_TOLERANCE
-    }
-    by_bucket = {
-        bucket: value / total_allocated
-        for bucket, value in by_bucket.items()
-        if value > _FLOAT_TOLERANCE
-    }
-    by_sleeve = {
-        sleeve: value / total_allocated
-        for sleeve, value in by_sleeve.items()
-        if value > _FLOAT_TOLERANCE
-    }
+    allocations = {key: value for key, value in allocations.items()}
+    by_bucket = {bucket: value for bucket, value in by_bucket.items()}
+    by_sleeve = {sleeve: value for sleeve, value in by_sleeve.items()}
 
     return RiskOptimizationResult(
         allocations=allocations,

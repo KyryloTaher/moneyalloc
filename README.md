@@ -87,3 +87,13 @@ The database file `allocations.db` lives inside the `moneyalloc_app` package dir
 - The project intentionally avoids third-party dependencies to ease distribution.
 - The default Tkinter theme is switched to `clam` when available to provide a modern appearance.
 - Sample data is declared programmatically in `moneyalloc_app/sample_data.py` and can be used as a template for further customisation.
+
+## Risk optimisation internals
+
+The planner applies a deterministic risk allocator implemented in [`moneyalloc_app/risk_optimizer.py`](moneyalloc_app/risk_optimizer.py). The behaviour can be summarised as follows:
+
+- `_tenors_for_bucket` filters the sleeves that can serve a bucket by insisting that their tenor does not exceed the bucket horizon and that the tenor was either supplied for that bucket or for an earlier (shorter) bucket.
+- `run_risk_equal_optimization` walks the buckets from the shortest horizon to the longest, builds a linear system that enforces the bucket minima, balances DV01/BEI01/CS01 exposure across the entire portfolio, and keeps currencies level whenever the same sleeve-tenor combination is investable in multiple regions.
+- If the resulting constraint matrix leaves extra degrees of freedom, the optimiser solves the row-space system `(A A^T) y = b` and projects back to allocations so underdetermined but consistent inputs still yield balanced recommendations instead of erroring on a singular normal equation.
+
+When you run a distribution, the application records these details in the risk summary panel so it is clear how the global risk balancing and currency constraints shape the recommendation.
