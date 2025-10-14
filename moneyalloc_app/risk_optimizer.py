@@ -80,7 +80,11 @@ def _tenors_for_bucket(
             raise ValueError(
                 f"Tenor {tenor_value} exceeds horizon {bucket_horizon} for bucket {bucket}."
             )
-        available[sleeve] = tenor_value
+        previous_tenor = available.get(sleeve)
+        if previous_tenor is None:
+            available[sleeve] = tenor_value
+        else:
+            available[sleeve] = min(previous_tenor, tenor_value)
 
     if not available:
         raise ValueError(f"No sleeves with tenor <= horizon found for bucket {bucket}.")
