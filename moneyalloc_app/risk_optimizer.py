@@ -88,83 +88,6 @@ def _tenors_for_bucket(
     return available
 
 
-def _solve_linear_constraints(
-    matrix: list[list[float]],
-    vector: list[float],
-) -> list[float]:
-    """Solve a (possibly underdetermined) linear system in a least-squares sense."""
-
-    if not matrix:
-        raise ValueError("No equations provided for optimisation.")
-
-    num_rows = len(matrix)
-    num_cols = len(matrix[0]) if matrix else 0
-    if any(len(row) != num_cols for row in matrix):
-        raise ValueError("Inconsistent matrix column sizes supplied to solver.")
-
-    def _solve_square(system: list[list[float]], targets: list[float]) -> list[float]:
-        size = len(system)
-        augmented = [list(map(float, system[i])) + [float(targets[i])] for i in range(size)]
-        tolerance = 1e-12
-
-        for column in range(size):
-            pivot_row = max(
-                range(column, size),
-                key=lambda candidate: abs(augmented[candidate][column]),
-            )
-            pivot_value = augmented[pivot_row][column]
-            if abs(pivot_value) <= tolerance:
-                raise ValueError("Unable to solve optimisation system.")
-            if pivot_row != column:
-                augmented[column], augmented[pivot_row] = augmented[pivot_row], augmented[column]
-
-            pivot = augmented[column][column]
-            for idx in range(column, size + 1):
-                augmented[column][idx] /= pivot
-
-            for row_index in range(size):
-                if row_index == column:
-                    continue
-                factor = augmented[row_index][column]
-                if abs(factor) <= tolerance:
-                    continue
-                for idx in range(column, size + 1):
-                    augmented[row_index][idx] -= factor * augmented[column][idx]
-
-        return [augmented[i][size] for i in range(size)]
-
-    if num_rows >= num_cols:
-        normal_matrix = [[0.0 for _ in range(num_cols)] for _ in range(num_cols)]
-        normal_vector = [0.0 for _ in range(num_cols)]
-
-        for row, target in zip(matrix, vector):
-            for i in range(num_cols):
-                coefficient_i = row[i]
-                if coefficient_i == 0.0:
-                    continue
-                normal_vector[i] += coefficient_i * target
-                for j in range(num_cols):
-                    coefficient_j = row[j]
-                    if coefficient_j == 0.0:
-                        continue
-                    normal_matrix[i][j] += coefficient_i * coefficient_j
-
-        solution = _solve_square(normal_matrix, normal_vector)
-    else:
-        row_matrix = [[0.0 for _ in range(num_rows)] for _ in range(num_rows)]
-        for i in range(num_rows):
-            for j in range(num_rows):
-                row_matrix[i][j] = sum(matrix[i][k] * matrix[j][k] for k in range(num_cols))
-
-        row_solution = _solve_square(row_matrix, [float(value) for value in vector])
-
-        solution = [0.0 for _ in range(num_cols)]
-        for col in range(num_cols):
-            solution[col] = sum(matrix[row][col] * row_solution[row] for row in range(num_rows))
-
-    return solution
-
-
 def run_risk_equal_optimization(spec: ProblemSpec) -> RiskOptimizationResult:
     """Optimise allocations subject to risk and currency balancing constraints."""
 
@@ -272,8 +195,51 @@ def run_risk_equal_optimization(spec: ProblemSpec) -> RiskOptimizationResult:
     if num_equations == 0:
         raise ValueError("No constraints supplied for optimisation.")
 
+    def _solve_normal_equations(matrix: list[list[float]], vector: list[float]) -> list[float]:
+        size = len(matrix)
+        augmented = [row[:] + [vector[i]] for i, row in enumerate(matrix)]
+
+        for col in range(size):
+            pivot_row = max(range(col, size), key=lambda r: abs(augmented[r][col]))
+            pivot_value = augmented[pivot_row][col]
+            if abs(pivot_value) <= 1e-12:
+                raise ValueError("Unable to solve optimisation system.")
+            if pivot_row != col:
+                augmented[col], augmented[pivot_row] = augmented[pivot_row], augmented[col]
+
+            pivot_value = augmented[col][col]
+            for idx in range(col, size + 1):
+                augmented[col][idx] /= pivot_value
+
+            for row_index in range(size):
+                if row_index == col:
+                    continue
+                factor = augmented[row_index][col]
+                if abs(factor) <= 1e-12:
+                    continue
+                for idx in range(col, size + 1):
+                    augmented[row_index][idx] -= factor * augmented[col][idx]
+
+        return [augmented[i][size] for i in range(size)]
+
+    num_vars = len(variables)
+    normal_matrix = [[0.0 for _ in range(num_vars)] for _ in range(num_vars)]
+    normal_vector = [0.0 for _ in range(num_vars)]
+
+    for row, target in zip(rows, rhs):
+        for i in range(num_vars):
+            coefficient_i = row[i]
+            if coefficient_i == 0.0:
+                continue
+            normal_vector[i] += coefficient_i * target
+            for j in range(num_vars):
+                coefficient_j = row[j]
+                if coefficient_j == 0.0:
+                    continue
+                normal_matrix[i][j] += coefficient_i * coefficient_j
+
     try:
-        solution = _solve_linear_constraints(rows, rhs)
+        solution = _solve_normal_equations(normal_matrix, normal_vector)
     except ValueError as exc:
         raise ValueError("Unable to equalise risk under the supplied constraints.") from exc
 

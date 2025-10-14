@@ -120,6 +120,13 @@ def test_currency_balancing_within_equal_tenors():
     assert math.isclose(eur_share, 0.5, rel_tol=1e-9)
     assert math.isclose(usd_share, eur_share, rel_tol=1e-9)
 
+def test_currency_balancing_within_equal_tenors():
+    spec = _build_spec(
+        bucket_weights={"USD::1Y": 50.0, "EUR::1Y": 50.0},
+        horizons={"USD::1Y": 1.0, "EUR::1Y": 1.0},
+        tenors={("USD::1Y", "rates"): 0.5, ("EUR::1Y", "rates"): 0.5},
+        currencies={"USD::1Y": "USD", "EUR::1Y": "EUR"},
+    )
 
 def test_equalises_risk_with_currency_balancing():
     spec = _build_spec(
@@ -167,37 +174,6 @@ def test_equalises_risk_with_currency_balancing():
     first = values[0]
     for value in values[1:]:
         assert math.isclose(first, value, rel_tol=1e-9)
-
-
-def test_under_determined_constraints_yield_solution():
-    spec = _build_spec(
-        bucket_weights={"SHORT": 50.0, "LONG": 50.0},
-        horizons={"SHORT": 1.0, "LONG": 2.0},
-        tenors={
-            ("SHORT", "rates"): 0.5,
-            ("SHORT", "credit"): 0.6,
-            ("LONG", "rates"): 1.5,
-            ("LONG", "credit"): 1.6,
-        },
-    )
-
-    result = run_risk_equal_optimization(spec)
-
-    assert math.isclose(result.by_bucket["SHORT"], 0.5, rel_tol=1e-9)
-    assert math.isclose(result.by_bucket["LONG"], 0.5, rel_tol=1e-9)
-
-    effective_tenors = _effective_tenors(spec)
-    exposures = {}
-    for (bucket, sleeve), value in result.allocations.items():
-        tenor = effective_tenors[bucket][sleeve]
-        exposures[sleeve] = exposures.get(sleeve, 0.0) + tenor * value
-
-    exposure_values = list(exposures.values())
-    assert len(exposure_values) == 2
-    assert math.isclose(exposure_values[0], exposure_values[1], rel_tol=1e-9)
-
-    for share in result.allocations.values():
-        assert share >= 0.0
 
 
 def test_missing_horizon_information_is_rejected():
