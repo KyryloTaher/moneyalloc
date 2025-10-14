@@ -1376,6 +1376,38 @@ class DistributionPanel(ttk.Frame):
             return MAX_TIME_HORIZON_LABEL
         return f"{value:.2f}y"
 
+    @staticmethod
+    def _split_allocation_across_tenors(
+        total_share: float, detail: RiskSelectionDetail
+    ) -> tuple[tuple[str, float], ...]:
+        """Split a sleeve allocation share across its available tenors."""
+
+        choices = detail.tenor_choices
+        if not choices:
+            return ()
+
+        weights: list[float] = []
+        for choice in choices:
+            weight = (1.0 / choice.years) if choice.years > 0 else 0.0
+            weights.append(weight)
+
+        total_weight = sum(weights)
+        if total_weight <= 0.0:
+            weights = [1.0] * len(choices)
+            total_weight = float(len(choices))
+
+        allocations: list[tuple[str, float]] = []
+        running_total = 0.0
+        for index, (choice, weight) in enumerate(zip(choices, weights)):
+            if index == len(choices) - 1:
+                share = total_share - running_total
+            else:
+                share = total_share * (weight / total_weight)
+                running_total += share
+            allocations.append((choice.label, share))
+
+        return tuple(allocations)
+
     @classmethod
     def _summarize_non_risk_rows(cls, rows: Iterable[PlanRow]) -> dict[str, float]:
         """Return the total target share for non-risk-managed horizons."""
@@ -1708,15 +1740,36 @@ class DistributionPanel(ttk.Frame):
                                     f"Tenor {self._format_tenor_years(selection.effective_tenor, bucket)}"
                                 )
                         notes_text = " | ".join(notes)
+                        sleeve_id = f"{bucket_id}:{sleeve}"
                         tree.insert(
                             bucket_id,
                             "end",
+                            iid=sleeve_id,
                             text=sleeve_labels.get(sleeve, sleeve.capitalize()),
                             values=(
                                 _format_amount(amount_value),
                                 notes_text,
                             ),
                         )
+                        if selection is not None and selection.tenor_choices:
+                            splits = self._split_allocation_across_tenors(
+                                allocation_share, selection
+                            )
+                            for index, (tenor_label, tenor_share) in enumerate(splits):
+                                if tenor_share <= 0:
+                                    continue
+                                tenor_amount = overall_invest_total * tenor_share
+                                tenor_notes = f"Share {tenor_share * 100:.2f}% of total"
+                                tree.insert(
+                                    sleeve_id,
+                                    "end",
+                                    iid=f"{sleeve_id}:{index}",
+                                    text=tenor_label,
+                                    values=(
+                                        _format_amount(tenor_amount),
+                                        tenor_notes,
+                                    ),
+                                )
                 if risk_result.fixed_buckets:
                     fixed_parent = f"fixed::{currency}"
                     tree.insert(
@@ -1945,10 +1998,16 @@ class DistributionPanel(ttk.Frame):
                 combined_key = make_bucket_key(currency, bucket)
                 combined_bucket_weights[combined_key] = weight * currency_share * 100.0
 
+        bucket_currencies = {
+            combined_key: currency
+            for combined_key, (currency, _bucket_name) in bucket_currency_map.items()
+        }
+
         spec = ProblemSpec(
             bucket_weights=combined_bucket_weights,
             bucket_horizons=bucket_horizons,
             tenors=tenors,
+            bucket_currencies=bucket_currencies,
         )
 
         try:
@@ -2005,9 +2064,19 @@ class DistributionPanel(ttk.Frame):
 
         overall_lines = [
             "Risk summary – all currencies (equal currency allocation enforced):",
-            "  Risk-aware cascading optimisation applied.",
+            "  Portfolio risk equalised across sleeves while horizon minima are honoured.",
             "  Currency allocation targets:",
         ]
+
+        overall_lines.extend(
+            (
+                "  • Buckets are processed from the shortest horizon to the longest so",
+                "    sleeves introduced earlier remain available for longer horizons.",
+                "  • DV01/BEI01/CS01 exposure is balanced across the whole plan while",
+                "    keeping currencies level whenever the same tenor is investable across",
+                "    multiple regions.",
+            )
+        )
 
         for currency in currencies:
             entry = results_map.get(currency)
@@ -2045,6 +2114,8 @@ class DistributionPanel(ttk.Frame):
                 f"Risk summary – {self._display_currency(currency)}:",
                 f"  Target share: {entry.currency_share * 100:.2f}% of investable funds",
                 "  Bucket weights considered:",
+                "    (Cumulative totals must increase with horizon; later buckets cannot",
+                "     reduce exposure to sleeves already in use.)",
             ]
             for bucket in sorted(entry.by_bucket, key=lambda name: (-entry.by_bucket[name], name)):
                 total_pct = entry.by_bucket[bucket] * 100.0
@@ -2057,9 +2128,7 @@ class DistributionPanel(ttk.Frame):
                 )
 
             lines.append("  Instruments used:")
-            for bucket in sorted(selections):
-                if bucket not in entry.by_bucket:
-                    continue
+            for bucket in sorted(entry.by_bucket, key=lambda name: (-entry.by_bucket[name], name)):
                 bucket_duration = horizon_to_years(bucket)
                 for sleeve, tenor_value in selections[bucket].items():
                     detail = self._risk_selection_details.get((currency, bucket, sleeve))
