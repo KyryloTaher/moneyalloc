@@ -66,29 +66,21 @@ def _tenors_for_bucket(
     """Return sleeves available for the provided bucket."""
 
     bucket_horizon = horizons[bucket]
-    available: Dict[Sleeve, float] = {}
+    available: Dict[Sleeve, float] = dict(previous)
 
     for (source_bucket, sleeve), tenor in tenors.items():
+        if source_bucket != bucket:
+            continue
         if tenor is None:
             continue
         tenor_value = float(tenor)
         if tenor_value <= 0.0:
             continue
-        source_horizon = horizons.get(source_bucket)
-        if source_horizon is None:
-            continue
-        if source_horizon - bucket_horizon > _FLOAT_TOLERANCE:
-            continue
         if tenor_value - bucket_horizon > _FLOAT_TOLERANCE:
-            continue
-        existing = available.get(sleeve)
-        if existing is None or tenor_value < existing:
-            available[sleeve] = tenor_value
-
-    # Ensure sleeves from previous stages remain available even if no new
-    # tenor is supplied for the current bucket.
-    for sleeve, tenor in previous.items():
-        available.setdefault(sleeve, tenor)
+            raise ValueError(
+                f"Tenor {tenor_value} exceeds horizon {bucket_horizon} for bucket {bucket}."
+            )
+        available[sleeve] = tenor_value
 
     if not available:
         raise ValueError(f"No sleeves with tenor <= horizon found for bucket {bucket}.")

@@ -80,8 +80,8 @@ def test_global_exposure_balancing_across_buckets():
         bucket_weights={"6M": 30.0, "1Y": 30.0, "2Y": 40.0},
         horizons={"6M": 0.5, "1Y": 1.0, "2Y": 2.0},
         tenors={
-            ("6M", "rates"): 0.25,
-            ("1Y", "rates"): 0.75,
+            ("6M", "rates"): 0.05,
+            ("1Y", "rates"): 0.1,
             ("2Y", "rates"): 1.5,
             ("2Y", "credit"): 1.8,
             ("2Y", "tips"): 1.0,
