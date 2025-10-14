@@ -186,3 +186,15 @@ def test_missing_horizon_information_is_rejected():
 
     with pytest.raises(ValueError):
         run_risk_equal_optimization(spec)
+
+
+def test_tenors_for_bucket_preserves_shorter_previous_tenor():
+    horizons = {"1Y": 1.0, "3Y": 3.0}
+    tenors = {("1Y", "rates"): 0.5, ("3Y", "rates"): 1.5}
+    previous = {"rates": 0.5}
+
+    sleeves = _tenors_for_bucket(
+        "3Y", horizons=horizons, tenors=tenors, previous=previous
+    )
+
+    assert sleeves["rates"] == 0.5
