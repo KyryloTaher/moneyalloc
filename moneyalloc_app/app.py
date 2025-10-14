@@ -324,26 +324,18 @@ class TreeNode:
 
 
 @dataclass(slots=True)
-class TenorChoice:
-    """Represents an available tenor option provided by the user."""
-
-    label: str
-    years: float
-
-
-@dataclass(slots=True)
 class RiskInputResult:
     """Container for processed risk input values."""
 
     tenors: dict[str, dict[str, dict[str, float]]]
-    tenor_choices: dict[tuple[str, str, str], tuple[TenorChoice, ...]]
+    tenor_labels: dict[tuple[str, str, str], tuple[str, ...]]
 
 
 @dataclass(slots=True)
 class RiskSelectionDetail:
-    """Describes a selected sleeve and the provided tenor options."""
+    """Describes a selected sleeve and the provided tenor labels."""
 
-    tenor_choices: tuple[TenorChoice, ...]
+    tenor_labels: tuple[str, ...]
     effective_tenor: float
 
 
@@ -612,22 +604,22 @@ class AllocationApp(ttk.Frame):
         selections = self.risk_inputs_panel.collect_inputs()
         self._risk_inputs = selections
         try:
-            tenors, choices = self._convert_risk_inputs_to_tenors(selections)
+            tenors, labels = self._convert_risk_inputs_to_tenors(selections)
         except ValueError as exc:
             self.risk_inputs_panel.set_status(str(exc))
             raise
         self.risk_inputs_panel.set_status("")
-        return RiskInputResult(tenors=tenors, tenor_choices=choices)
+        return RiskInputResult(tenors=tenors, tenor_labels=labels)
 
     @staticmethod
     def _convert_risk_inputs_to_tenors(
         selections: dict[str, dict[str, dict[str, dict[str, object]]]]
     ) -> tuple[
         dict[str, dict[str, dict[str, float]]],
-        dict[tuple[str, str, str], tuple[TenorChoice, ...]],
+        dict[tuple[str, str, str], tuple[str, ...]],
     ]:
         converted: dict[str, dict[str, dict[str, float]]] = {}
-        choices: dict[tuple[str, str, str], tuple[TenorChoice, ...]] = {}
+        labels: dict[tuple[str, str, str], tuple[str, ...]] = {}
         for currency, horizons in selections.items():
             currency_data: dict[str, dict[str, float]] = {}
             for horizon, sleeve_data in horizons.items():
@@ -648,9 +640,8 @@ class AllocationApp(ttk.Frame):
                         raise ValueError(f"{label}: {exc}") from exc
                     if tenors:
                         tenor_value = min(value for value, _ in tenors)
-                        choices[(currency, horizon, sleeve)] = tuple(
-                            TenorChoice(label=canonical, years=value)
-                            for value, canonical in tenors
+                        labels[(currency, horizon, sleeve)] = tuple(
+                            canonical for _, canonical in tenors
                         )
                     else:
                         try:
@@ -661,13 +652,13 @@ class AllocationApp(ttk.Frame):
                                 f"{label}: Unable to infer tenor from the time horizon. "
                                 "Enter at least one tenor using formats such as 1D, 2W, 6M or 3Y."
                             ) from exc
-                        choices[(currency, horizon, sleeve)] = ()
+                        labels[(currency, horizon, sleeve)] = ()
                     horizon_values[sleeve] = tenor_value
                 if horizon_values:
                     currency_data[horizon] = horizon_values
             if currency_data:
                 converted[currency] = currency_data
-        return converted, choices
+        return converted, labels
 
     @staticmethod
     def _parse_tenor_values(text: str) -> list[tuple[float, str]]:
@@ -1740,13 +1731,14 @@ class DistributionPanel(ttk.Frame):
                         amount_value = overall_invest_total * allocation_share
                         selection = self._risk_selection_details.get((currency, bucket, sleeve))
                         notes = [f"Share {allocation_share * 100:.2f}% of total"]
-                        if selection is not None and selection.tenor_choices:
-                            labels_text = ", ".join(choice.label for choice in selection.tenor_choices)
-                            notes.append(f"Tenors {labels_text}")
-                        elif selection is not None:
-                            notes.append(
-                                f"Tenor {self._format_tenor_years(selection.effective_tenor, bucket)}"
-                            )
+                        if selection is not None:
+                            if selection.tenor_labels:
+                                labels_text = ", ".join(selection.tenor_labels)
+                                notes.append(f"Tenors {labels_text}")
+                            else:
+                                notes.append(
+                                    f"Tenor {self._format_tenor_years(selection.effective_tenor, bucket)}"
+                                )
                         notes_text = " | ".join(notes)
                         sleeve_id = f"{bucket_id}:{sleeve}"
                         tree.insert(
@@ -1889,7 +1881,7 @@ class DistributionPanel(ttk.Frame):
             return notice, {}
 
         effective_inputs = input_result.tenors
-        choice_lookup = input_result.tenor_choices
+        label_lookup = input_result.tenor_labels
         self._active_risk_inputs = effective_inputs
 
         def make_bucket_key(currency: str, bucket: str) -> str:
@@ -1987,9 +1979,9 @@ class DistributionPanel(ttk.Frame):
                     else:
                         tenor = bucket_duration
                     tenors[(combined_key, sleeve)] = tenor
-                    tenor_choices = choice_lookup.get((currency, bucket, sleeve), ())
+                    labels = label_lookup.get((currency, bucket, sleeve), ())
                     self._risk_selection_details[(currency, bucket, sleeve)] = RiskSelectionDetail(
-                        tenor_choices=tenor_choices,
+                        tenor_labels=labels,
                         effective_tenor=tenor,
                     )
 
@@ -2138,33 +2130,19 @@ class DistributionPanel(ttk.Frame):
             lines.append("  Instruments used:")
             for bucket in sorted(entry.by_bucket, key=lambda name: (-entry.by_bucket[name], name)):
                 bucket_duration = horizon_to_years(bucket)
-                for sleeve in ("rates", "tips", "credit"):
-                    share = entry.allocations.get((bucket, sleeve), 0.0)
-                    if share <= 0:
-                        continue
+                for sleeve, tenor_value in selections[bucket].items():
                     detail = self._risk_selection_details.get((currency, bucket, sleeve))
                     label = sleeve_labels.get(sleeve, sleeve.capitalize())
-                    if detail and detail.tenor_choices:
-                        splits = self._split_allocation_across_tenors(share, detail)
-                        for tenor_label, tenor_share in splits:
-                            if tenor_share <= 0:
-                                continue
-                            lines.append(
-                                f"    {bucket}: {label} | {tenor_label} ({tenor_share * 100:.2f}% of total)"
-                            )
+                    if detail and detail.tenor_labels:
+                        tenor_label = ", ".join(detail.tenor_labels)
+                        lines.append(f"    {bucket}: {label} | Tenors {tenor_label}")
                     else:
-                        if detail is not None:
-                            tenor_display = detail.effective_tenor
+                        if tenor_value is not None and tenor_value > 0:
+                            tenor_display = float(tenor_value)
                         else:
-                            tenor_value = selections.get(bucket, {}).get(sleeve)
-                            if tenor_value is not None and tenor_value > 0:
-                                tenor_display = float(tenor_value)
-                            else:
-                                tenor_display = bucket_duration
+                            tenor_display = bucket_duration
                         tenor_label = self._format_tenor_years(tenor_display, bucket)
-                        lines.append(
-                            f"    {bucket}: {label} | Tenor {tenor_label} ({share * 100:.2f}% of total)"
-                        )
+                        lines.append(f"    {bucket}: {label} | Tenor {tenor_label}")
 
             if entry.per_bucket_sleeve:
                 lines.append("  Sleeve distribution by tenor:")
