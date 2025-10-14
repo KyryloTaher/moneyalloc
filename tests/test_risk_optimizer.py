@@ -120,6 +120,13 @@ def test_currency_balancing_within_equal_tenors():
     assert math.isclose(eur_share, 0.5, rel_tol=1e-9)
     assert math.isclose(usd_share, eur_share, rel_tol=1e-9)
 
+def test_currency_balancing_within_equal_tenors():
+    spec = _build_spec(
+        bucket_weights={"USD::1Y": 50.0, "EUR::1Y": 50.0},
+        horizons={"USD::1Y": 1.0, "EUR::1Y": 1.0},
+        tenors={("USD::1Y", "rates"): 0.5, ("EUR::1Y", "rates"): 0.5},
+        currencies={"USD::1Y": "USD", "EUR::1Y": "EUR"},
+    )
 
 def test_equalises_risk_with_currency_balancing():
     spec = _build_spec(
