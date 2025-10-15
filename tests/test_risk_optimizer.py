@@ -176,6 +176,38 @@ def test_equalises_risk_with_currency_balancing():
         assert math.isclose(first, value, rel_tol=1e-9)
 
 
+def test_handles_under_determined_balancing_system():
+    spec = _build_spec(
+        bucket_weights={"6M": 60.0, "2Y": 40.0},
+        horizons={"6M": 0.5, "2Y": 2.0},
+        tenors={
+            ("6M", "rates"): 0.5,
+            ("6M", "credit"): 0.5,
+            ("2Y", "rates"): 1.5,
+            ("2Y", "credit"): 1.8,
+        },
+    )
+
+    result = run_risk_equal_optimization(spec)
+
+    assert math.isclose(result.by_bucket["6M"], 0.6, rel_tol=1e-9)
+    assert math.isclose(result.by_bucket["2Y"], 0.4, rel_tol=1e-9)
+
+    effective_tenors = _effective_tenors(spec)
+    exposure_rates = sum(
+        value * effective_tenors[bucket][sleeve]
+        for (bucket, sleeve), value in result.allocations.items()
+        if sleeve == "rates"
+    )
+    exposure_credit = sum(
+        value * effective_tenors[bucket][sleeve]
+        for (bucket, sleeve), value in result.allocations.items()
+        if sleeve == "credit"
+    )
+
+    assert math.isclose(exposure_rates, exposure_credit, rel_tol=1e-9)
+
+
 def test_missing_horizon_information_is_rejected():
     spec = _build_spec(
         bucket_weights={"1Y": 100.0},

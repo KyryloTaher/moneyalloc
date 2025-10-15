@@ -227,25 +227,29 @@ def run_risk_equal_optimization(spec: ProblemSpec) -> RiskOptimizationResult:
         return [augmented[i][size] for i in range(size)]
 
     num_vars = len(variables)
-    normal_matrix = [[0.0 for _ in range(num_vars)] for _ in range(num_vars)]
-    normal_vector = [0.0 for _ in range(num_vars)]
 
-    for row, target in zip(rows, rhs):
-        for i in range(num_vars):
-            coefficient_i = row[i]
-            if coefficient_i == 0.0:
-                continue
-            normal_vector[i] += coefficient_i * target
-            for j in range(num_vars):
-                coefficient_j = row[j]
-                if coefficient_j == 0.0:
-                    continue
-                normal_matrix[i][j] += coefficient_i * coefficient_j
+    def _solve_with_multipliers() -> list[float]:
+        """Solve the equality constrained system using Lagrange multipliers."""
 
-    try:
-        solution = _solve_normal_equations(normal_matrix, normal_vector)
-    except ValueError as exc:
-        raise ValueError("Unable to equalise risk under the supplied constraints.") from exc
+        num_equations = len(rows)
+        gram: list[list[float]] = [[0.0 for _ in range(num_equations)] for _ in range(num_equations)]
+
+        for i, row_i in enumerate(rows):
+            for j, row_j in enumerate(rows):
+                gram[i][j] = sum(value_i * value_j for value_i, value_j in zip(row_i, row_j))
+            gram[i][i] += 1e-12
+
+        try:
+            multipliers = _solve_normal_equations(gram, rhs)
+        except ValueError as exc:
+            raise ValueError("Unable to equalise risk under the supplied constraints.") from exc
+
+        solution = [0.0 for _ in range(num_vars)]
+        for column in range(num_vars):
+            solution[column] = sum(rows[row_index][column] * multipliers[row_index] for row_index in range(num_equations))
+        return solution
+
+    solution = _solve_with_multipliers()
 
     residual_sum = 0.0
     for row, target in zip(rows, rhs):
