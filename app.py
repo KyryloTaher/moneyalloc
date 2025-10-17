@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Dict, Optional
 
 from moneyalloc import allocation
-from moneyalloc.database import AllocationRecord, Database, TenorInputRecord
+from moneyalloc.database import (
+    AllocationRecord,
+    Database,
+    PortfolioRecord,
+    TenorInputRecord,
+)
 
 
 class MoneyAllocApp(tk.Tk):
@@ -35,6 +41,7 @@ class MoneyAllocApp(tk.Tk):
         self.refresh_tree()
         self.refresh_buckets()
         self.refresh_results()
+        self.refresh_portfolios()
 
     # ------------------------------------------------------------------ Tab 1
     def _setup_tab1(self) -> None:
@@ -391,6 +398,49 @@ class MoneyAllocApp(tk.Tk):
         self.summary_var = tk.StringVar(value="No results yet")
         ttk.Label(frame, textvariable=self.summary_var).pack(anchor=tk.W, padx=10, pady=(0, 10))
 
+        control_frame = ttk.Frame(frame)
+        control_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Label(control_frame, text="Portfolio name").grid(row=0, column=0, sticky=tk.W)
+        self.portfolio_name_entry = ttk.Entry(control_frame, width=40)
+        self.portfolio_name_entry.grid(row=1, column=0, sticky=tk.W + tk.E, pady=(2, 0))
+        ttk.Button(control_frame, text="Save portfolio", command=self.save_portfolio).grid(
+            row=1, column=1, padx=(10, 0), sticky=tk.E
+        )
+        control_frame.columnconfigure(0, weight=1)
+
+        self.baseline_var = tk.StringVar(value="No saved portfolios yet")
+        ttk.Label(control_frame, textvariable=self.baseline_var).grid(
+            row=2, column=0, columnspan=2, sticky=tk.W, pady=(8, 0)
+        )
+
+        ttk.Label(frame, text="Suggested trades").pack(anchor=tk.W, padx=10)
+        rec_columns = ("action", "risk_group", "currency", "tenor", "amount")
+        self.recommendation_tree = ttk.Treeview(
+            frame, columns=rec_columns, show="headings", height=8
+        )
+        rec_headings = {
+            "action": "Action",
+            "risk_group": "Risk group",
+            "currency": "Currency",
+            "tenor": "Tenor",
+            "amount": "Amount",
+        }
+        for key, text in rec_headings.items():
+            self.recommendation_tree.heading(key, text=text)
+            self.recommendation_tree.column(key, width=120, stretch=True)
+        self.recommendation_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        ttk.Label(frame, text="Saved portfolios").pack(anchor=tk.W, padx=10)
+        portfolio_columns = ("name", "created")
+        self.portfolio_tree = ttk.Treeview(
+            frame, columns=portfolio_columns, show="headings", height=6
+        )
+        self.portfolio_tree.heading("name", text="Name")
+        self.portfolio_tree.heading("created", text="Saved at (UTC)")
+        for column in portfolio_columns:
+            self.portfolio_tree.column(column, width=200, stretch=True)
+        self.portfolio_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
     def refresh_results(self) -> None:
         for item in self.result_tree.get_children():
             self.result_tree.delete(item)
@@ -425,6 +475,82 @@ class MoneyAllocApp(tk.Tk):
         self.summary_var.set(
             f"Exposure spread: {spread:.2f}; average exposure: {average_exposure:.2f}"
         )
+
+        bucket_map = {bucket.bucket_key: bucket for bucket in self.db.get_buckets()}
+        self.current_positions = allocation.results_to_positions(results, bucket_map)
+        self.update_recommendations()
+
+    def refresh_portfolios(self) -> None:
+        for item in self.portfolio_tree.get_children():
+            self.portfolio_tree.delete(item)
+        portfolios = self.db.list_portfolios()
+        for record in portfolios:
+            self.portfolio_tree.insert(
+                "",
+                tk.END,
+                values=(record.name, record.created_at),
+            )
+        default_name = self._default_portfolio_name()
+        self.portfolio_name_entry.delete(0, tk.END)
+        self.portfolio_name_entry.insert(0, default_name)
+        self.update_recommendations()
+
+    def update_recommendations(self) -> None:
+        for item in self.recommendation_tree.get_children():
+            self.recommendation_tree.delete(item)
+
+        baseline_record: Optional[PortfolioRecord] = self.db.get_latest_portfolio()
+        if baseline_record:
+            baseline_positions = self.db.get_portfolio_positions(baseline_record.id)
+            self.baseline_var.set(
+                f"Comparing against: {baseline_record.name} (saved {baseline_record.created_at} UTC)"
+            )
+        else:
+            baseline_positions = {}
+            self.baseline_var.set("No saved portfolios yet")
+
+        current_positions = getattr(self, "current_positions", {})
+        try:
+            total_amount = float(self.total_amount_entry.get())
+        except (ValueError, tk.TclError):
+            total_amount = sum(current_positions.values()) if current_positions else 0.0
+        margin = total_amount * 0.0002 if total_amount else 0.0
+
+        recommendations = allocation.build_recommendations(
+            baseline_positions,
+            current_positions,
+            margin,
+        )
+
+        for rec in recommendations:
+            self.recommendation_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    rec.action,
+                    rec.risk_group,
+                    rec.currency,
+                    f"{rec.tenor:.2f}",
+                    f"{rec.amount:.2f}",
+                ),
+            )
+
+    def _default_portfolio_name(self) -> str:
+        return datetime.utcnow().strftime("Portfolio %Y-%m-%d %H:%M:%S")
+
+    def save_portfolio(self) -> None:
+        results = self.db.get_results()
+        if not results:
+            messagebox.showinfo("No results", "Calculate results before saving a portfolio")
+            return
+        name = self.portfolio_name_entry.get().strip() or self._default_portfolio_name()
+        bucket_map = {bucket.bucket_key: bucket for bucket in self.db.get_buckets()}
+        positions = allocation.results_to_positions(results, bucket_map)
+        portfolio_id = self.db.save_portfolio(name, positions)
+        messagebox.showinfo(
+            "Portfolio saved", f"Saved portfolio #{portfolio_id}: {name}"
+        )
+        self.refresh_portfolios()
 
 
 if __name__ == "__main__":
