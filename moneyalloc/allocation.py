@@ -149,38 +149,49 @@ def calculate_results(
     bucket_keys = [bucket.bucket_key for bucket in buckets]
     amounts = []
     options: List[List[Tuple[float, float]]] = []
+    group_availability: Dict[str, set[str]] = {}
+
     for bucket in buckets:
         bucket_amount = total_amount * (bucket.percentage / 100.0)
         amounts.append(bucket_amount)
         bucket_tenors = tenor_inputs.get(bucket.bucket_key, {})
-        dv01_tenors = [t for t in bucket_tenors.get("DV01", []) if t <= bucket.time_horizon + 1e-9]
+        dv01_tenors = [
+            t for t in bucket_tenors.get("DV01", []) if t <= bucket.time_horizon + 1e-9
+        ]
         if not dv01_tenors:
             # Default to min(time_horizon, 1) if no valid tenor provided
             fallback = min(bucket.time_horizon, 1.0)
             dv01_tenors = [fallback]
         options.append([(tenor, bucket_amount * tenor) for tenor in dv01_tenors])
 
+        available_groups = {"DV01"}
+        bei01_tenors = [
+            t for t in bucket_tenors.get("BEI01", []) if t <= bucket.time_horizon + 1e-9
+        ]
+        cs01_tenors = [
+            t for t in bucket_tenors.get("CS01", []) if t <= bucket.time_horizon + 1e-9
+        ]
+        if bei01_tenors:
+            available_groups.add("BEI01")
+        if cs01_tenors:
+            available_groups.add("CS01")
+        group_availability[bucket.bucket_key] = available_groups
+
     best_tenors, _, _ = _calc_dv01_combination(bucket_keys, options)
     if not best_tenors:
         best_tenors = [choices[0][0] for choices in options]
 
-    risk_groups = ["DV01"]
-    if any(tenor_inputs.get(key, {}).get("BEI01") for key in bucket_keys):
-        risk_groups.append("BEI01")
-    if any(tenor_inputs.get(key, {}).get("CS01") for key in bucket_keys):
-        risk_groups.append("CS01")
-
-    risk_group_count = len(risk_groups)
-
     results: List[ResultRecord] = []
     for bucket, bucket_amount, dv01_tenor in zip(buckets, amounts, best_tenors):
         exposure = bucket_amount * dv01_tenor
+        available_groups = group_availability.get(bucket.bucket_key, {"DV01"})
+        risk_group_count = len(available_groups)
         if risk_group_count > 0:
             shared_tenor = dv01_tenor / risk_group_count
         else:
             shared_tenor = dv01_tenor
-        bei01_tenor = shared_tenor if "BEI01" in risk_groups else 0.0
-        cs01_tenor = shared_tenor if "CS01" in risk_groups else 0.0
+        bei01_tenor = shared_tenor if "BEI01" in available_groups else 0.0
+        cs01_tenor = shared_tenor if "CS01" in available_groups else 0.0
         results.append(
             ResultRecord(
                 bucket_key=bucket.bucket_key,
