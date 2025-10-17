@@ -6,7 +6,7 @@ import itertools
 import math
 from dataclasses import dataclass
 from statistics import mean, pstdev
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 from .database import AllocationRecord, BucketRecord, ResultRecord
 
@@ -17,6 +17,15 @@ class LeafAllocation:
     time_horizon: float
     currency: str
     percentage: float
+
+
+@dataclass
+class Recommendation:
+    action: str
+    risk_group: str
+    currency: str
+    tenor: float
+    amount: float
 
 
 def normalise_percentage(value: float) -> float:
@@ -204,4 +213,57 @@ def calculate_results(
         )
 
     return results
+
+
+def results_to_positions(
+    results: Sequence[ResultRecord],
+    buckets: Mapping[str, BucketRecord],
+) -> Dict[Tuple[str, str, float], float]:
+    """Expand results into risk-group/currency/tenor positions."""
+
+    positions: Dict[Tuple[str, str, float], float] = {}
+    for result in results:
+        bucket = buckets.get(result.bucket_key)
+        if not bucket:
+            continue
+        currency = bucket.currency
+        entries: List[Tuple[str, float]] = [("DV01", result.dv01_tenor)]
+        if result.bei01_tenor > 0:
+            entries.append(("BEI01", result.bei01_tenor))
+        if result.cs01_tenor > 0:
+            entries.append(("CS01", result.cs01_tenor))
+        for risk_group, tenor in entries:
+            key = (risk_group, currency, tenor)
+            positions[key] = positions.get(key, 0.0) + result.amount
+    return positions
+
+
+def build_recommendations(
+    baseline: Mapping[Tuple[str, str, float], float],
+    current: Mapping[Tuple[str, str, float], float],
+    margin: float,
+) -> List[Recommendation]:
+    """Compare two position sets and suggest trades beyond a margin."""
+
+    keys = set(baseline) | set(current)
+    recommendations: List[Recommendation] = []
+    for key in keys:
+        baseline_amount = baseline.get(key, 0.0)
+        current_amount = current.get(key, 0.0)
+        difference = current_amount - baseline_amount
+        if abs(difference) <= max(margin, 0.0):
+            continue
+        action = "Buy" if difference > 0 else "Sell"
+        recommendations.append(
+            Recommendation(
+                action=action,
+                risk_group=key[0],
+                currency=key[1],
+                tenor=key[2],
+                amount=abs(difference),
+            )
+        )
+
+    recommendations.sort(key=lambda rec: (rec.risk_group, rec.currency, rec.tenor))
+    return recommendations
 

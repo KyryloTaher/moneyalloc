@@ -5,8 +5,9 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 
 DB_FILENAME = "moneyalloc.db"
@@ -47,6 +48,22 @@ class ResultRecord:
     bei01_tenor: float
     cs01_tenor: float
     dv01_exposure: float
+
+
+@dataclass
+class PortfolioRecord:
+    id: int
+    name: str
+    created_at: str
+
+
+@dataclass
+class PortfolioPosition:
+    portfolio_id: int
+    risk_group: str
+    currency: str
+    tenor: float
+    amount: float
 
 
 class Database:
@@ -109,6 +126,27 @@ class Database:
                     bei01_tenor REAL NOT NULL,
                     cs01_tenor REAL NOT NULL,
                     dv01_exposure REAL NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS portfolios (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS portfolio_positions (
+                    portfolio_id INTEGER NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+                    risk_group TEXT NOT NULL,
+                    currency TEXT NOT NULL,
+                    tenor REAL NOT NULL,
+                    amount REAL NOT NULL,
+                    PRIMARY KEY (portfolio_id, risk_group, currency, tenor)
                 )
                 """
             )
@@ -316,4 +354,62 @@ class Database:
             )
             for row in rows
         ]
+
+    # Portfolio history ----------------------------------------------------
+    def save_portfolio(
+        self,
+        name: str,
+        positions: Dict[Tuple[str, str, float], float],
+    ) -> int:
+        timestamp = datetime.utcnow().isoformat(timespec="seconds")
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO portfolios (name, created_at) VALUES (?, ?)",
+                (name, timestamp),
+            )
+            portfolio_id = cursor.lastrowid
+            cursor.executemany(
+                """
+                INSERT INTO portfolio_positions (portfolio_id, risk_group, currency, tenor, amount)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (portfolio_id, risk_group, currency, tenor, amount)
+                    for (risk_group, currency, tenor), amount in positions.items()
+                ],
+            )
+            return int(portfolio_id)
+
+    def list_portfolios(self) -> List[PortfolioRecord]:
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, name, created_at FROM portfolios ORDER BY datetime(created_at) DESC"
+            )
+            rows = cursor.fetchall()
+        return [PortfolioRecord(id=row[0], name=row[1], created_at=row[2]) for row in rows]
+
+    def get_portfolio_positions(
+        self, portfolio_id: int
+    ) -> Dict[Tuple[str, str, float], float]:
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT risk_group, currency, tenor, amount
+                FROM portfolio_positions
+                WHERE portfolio_id = ?
+                """,
+                (portfolio_id,),
+            )
+            rows = cursor.fetchall()
+        return {
+            (row[0], row[1], row[2]): row[3]
+            for row in rows
+        }
+
+    def get_latest_portfolio(self) -> Optional[PortfolioRecord]:
+        portfolios = self.list_portfolios()
+        return portfolios[0] if portfolios else None
 
