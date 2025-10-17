@@ -5,7 +5,7 @@ Moneyalloc is a Tkinter-based desktop application that helps you build and balan
 ## Features
 
 1. Build a hierarchical allocation tree of asset distributions.
-2. Aggregate leaf allocations into time horizon / currency buckets.
+2. Aggregate leaf allocations into time horizon / currency buckets, evenly splitting a leaf's share across its currencies.
 3. Input tenor options for each risk group and total investment amount.
 4. Calculate an allocation that balances DV01 exposure while respecting tenor constraints.
 5. Store all user inputs and calculated outputs in a local SQLite database (`moneyalloc.db`).

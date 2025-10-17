@@ -46,6 +46,7 @@ def build_leaf_allocations(allocations: Iterable[AllocationRecord]) -> List[Leaf
                 return
             if node.time_horizon is None:
                 return
+            currency_share = current * 100.0 / len(currencies)
             for currency in currencies:
                 bucket_key = f"{node.time_horizon}|{currency.upper()}"
                 leaves.append(
@@ -53,7 +54,7 @@ def build_leaf_allocations(allocations: Iterable[AllocationRecord]) -> List[Leaf
                         bucket_key=bucket_key,
                         time_horizon=node.time_horizon,
                         currency=currency.upper(),
-                        percentage=current * 100.0,
+                        percentage=currency_share,
                     )
                 )
         else:
